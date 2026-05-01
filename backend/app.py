@@ -9,6 +9,7 @@ import time
 import csv
 import io
 import json
+from pathlib import Path
 from datetime import datetime
 from pymongo.errors import PyMongoError
 import requests
@@ -29,13 +30,17 @@ active_thread = None
 active_sync_job_id = None
 bot_lock = threading.Lock()
 
-sync_logs = {"kpi": [], "qa1": [], "qa2": []}
+sync_logs = {"kpi": [], "qa1": [], "qa2": [], "pass_rate": []}
 
 # Trạng thái hoàn thành sync (persist sau khi bot cleanup)
 sync_completion = {"job_id": None, "status": None, "progress": 0}
 
+pass_rate_status = {"job_id": None, "running": False, "started_at": None, "finished_at": None}
+pass_rate_lock = threading.Lock()
+
 import kpi_automation
 import list_qa
+import pass_rate
 import logging
 
 class SyncLogHandler(logging.Handler):
@@ -49,10 +54,20 @@ sync_log_handler = SyncLogHandler()
 sync_log_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s', "%H:%M:%S"))
 kpi_automation.logger.addHandler(sync_log_handler)
 list_qa.logger.addHandler(sync_log_handler)
+pass_rate.logger.addHandler(sync_log_handler)
 
 
 def _serialize_error(message, code=500):
     return jsonify({"error": message}), code
+
+
+def _to_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        return float(str(value).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return default
 
 @app.route('/run-automation', methods=['POST'])
 def run_automation():
@@ -284,6 +299,100 @@ def update_job(job_id):
         return jsonify({"message": "Cập nhật thành công"}), 200
     except Exception as e:
         return _serialize_error(str(e), 500)
+
+
+@app.route('/api/jobs/<job_id>/pass-rate', methods=['GET'])
+def get_job_pass_rate(job_id):
+    """
+    Trả về dữ liệu pass-rate đã export từ automation (pass_rate_results.csv)
+    để frontend hiển thị trên trang chi tiết job.
+    """
+    try:
+        csv_path = Path(__file__).resolve().parent / "pass_rate_results.csv"
+        if not csv_path.exists():
+            return jsonify({
+                "jobId": job_id,
+                "rows": [],
+                "summary": {
+                    "contributors": 0,
+                    "avgPassRate": 0,
+                    "totalLabelHours": 0,
+                    "totalReworkHours": 0,
+                },
+                "source": str(csv_path.name),
+                "note": "Chưa có file pass_rate_results.csv"
+            }), 200
+
+        rows = []
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                username = (row.get("username") or "").strip()
+                if not username:
+                    continue
+                label_hours = _to_float(row.get("Thời gian label"), 0)
+                rework_hours = _to_float(row.get("Thời gian sửa bài"), 0)
+                pass_rate = _to_float(row.get("Tỉ lệ chính xác"), 0)
+                rows.append({
+                    "username": username,
+                    "labelHours": label_hours,
+                    "reworkHours": rework_hours,
+                    "passRate": pass_rate,
+                })
+
+        contributors = len(rows)
+        total_label = round(sum(r["labelHours"] for r in rows), 2)
+        total_rework = round(sum(r["reworkHours"] for r in rows), 2)
+        avg_pass_rate = round(sum(r["passRate"] for r in rows) / contributors, 2) if contributors else 0
+
+        return jsonify({
+            "jobId": job_id,
+            "rows": rows,
+            "summary": {
+                "contributors": contributors,
+                "avgPassRate": avg_pass_rate,
+                "totalLabelHours": total_label,
+                "totalReworkHours": total_rework,
+            },
+            "source": str(csv_path.name),
+        }), 200
+    except Exception as e:
+        return _serialize_error(f"Lỗi khi đọc pass-rate: {str(e)}", 500)
+
+@app.route('/api/jobs/<job_id>/pass-rate/sync', methods=['POST'])
+def sync_pass_rate(job_id):
+    """Chạy pass_rate automation và ghi lại pass_rate_results.csv."""
+    def background_task():
+        with pass_rate_lock:
+            pass_rate_status["job_id"] = job_id
+            pass_rate_status["running"] = True
+            pass_rate_status["started_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            pass_rate_status["finished_at"] = None
+        sync_logs["pass_rate"] = []
+        try:
+            csv_path = Path(__file__).resolve().parent / "pass_rate_results.csv"
+            pass_rate.run_automation(job_id=job_id, headless=True, output_path=str(csv_path))
+        except Exception as e:
+            app.logger.exception("Pass-rate sync failed for %s: %s", job_id, e)
+        finally:
+            with pass_rate_lock:
+                pass_rate_status["running"] = False
+                pass_rate_status["finished_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    thread = threading.Thread(target=background_task, name="pass_rate", daemon=True)
+    thread.start()
+    return jsonify({"message": "Đang đồng bộ pass-rate..."}), 202
+
+@app.route('/api/jobs/<job_id>/pass-rate/status', methods=['GET'])
+def get_pass_rate_status(job_id):
+    with pass_rate_lock:
+        running = pass_rate_status["running"] and pass_rate_status["job_id"] == job_id
+        return jsonify({
+            "jobId": job_id,
+            "running": running,
+            "startedAt": pass_rate_status["started_at"],
+            "finishedAt": pass_rate_status["finished_at"],
+        }), 200
 
 @app.route('/api/jobs/<job_id>/hide-user', methods=['POST'])
 def toggle_hide_user(job_id):
@@ -633,6 +742,7 @@ def sync_job(job_id):
         sync_logs["kpi"] = []
         sync_logs["qa1"] = []
         sync_logs["qa2"] = []
+        sync_logs["pass_rate"] = []
         
         # Reset trạng thái hoàn thành trước đó
         sync_completion = {"job_id": None, "status": None, "progress": 0}

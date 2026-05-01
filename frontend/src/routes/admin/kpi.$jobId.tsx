@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-router";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
@@ -58,9 +58,9 @@ function PackageDetail() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState(0);
   const syncProgressRef = useRef(0);
-  const [syncLogs, setSyncLogs] = useState<{kpi: string[], qa1: string[], qa2: string[]}>({kpi: [], qa1: [], qa2: []});
+  const [syncLogs, setSyncLogs] = useState<{kpi: string[], qa1: string[], qa2: string[], pass_rate: string[]}>({kpi: [], qa1: [], qa2: [], pass_rate: []});
   const logsEndRef = useRef<HTMLDivElement>(null);
-  const [syncOptions, setSyncOptions] = useState({ kpi: true, qa1: true, qa2: true });
+  const [syncOptions, setSyncOptions] = useState({ kpi: true, qa1: true, qa2: true, passRate: false });
   const [showSyncPopup, setShowSyncPopup] = useState(false);
   const [showUserPopup, setShowUserPopup] = useState(false);
   const [isTogglingHide, setIsTogglingHide] = useState(false);
@@ -68,6 +68,22 @@ function PackageDetail() {
   const [isCheckingServer, setIsCheckingServer] = useState(true);
   const [overviewPanelIndex, setOverviewPanelIndex] = useState(0);
   const [isOverviewPanelHovered, setIsOverviewPanelHovered] = useState(false);
+  const [isPassRateLoading, setIsPassRateLoading] = useState(false);
+  const [isPassRateSyncing, setIsPassRateSyncing] = useState(false);
+  const [passRateRows, setPassRateRows] = useState<Array<{ username: string; passRate: number; labelHours: number; reworkHours: number }>>([]);
+  const [passRateSummary, setPassRateSummary] = useState({
+    contributors: 0,
+    avgPassRate: 0,
+    totalLabelHours: 0,
+    totalReworkHours: 0,
+  });
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const checkAppenServerOnline = async () => {
     try {
@@ -227,13 +243,89 @@ function PackageDetail() {
     return () => clearInterval(timer);
   }, []);
 
+  const loadPassRateData = useCallback(async () => {
+    setIsPassRateLoading(true);
+    try {
+      const API_BASE = typeof window === "undefined" ? "http://backend:5000" : "http://localhost:5000";
+      const res = await fetch(`${API_BASE}/api/jobs/${job.jobId}/pass-rate`);
+      if (!res.ok) throw new Error("Không lấy được dữ liệu pass-rate");
+      const data = await res.json();
+      const summary = data?.summary || {};
+      if (!isMountedRef.current) return;
+      const rows = Array.isArray(data?.rows) ? data.rows : [];
+      setPassRateRows(
+        rows
+          .filter((row: any) => row?.username)
+          .map((row: any) => ({
+            username: String(row.username),
+            passRate: Number(row.passRate) || 0,
+            labelHours: Number(row.labelHours) || 0,
+            reworkHours: Number(row.reworkHours) || 0,
+          }))
+      );
+      setPassRateSummary({
+        contributors: Number(summary.contributors) || 0,
+        avgPassRate: Number(summary.avgPassRate) || 0,
+        totalLabelHours: Number(summary.totalLabelHours) || 0,
+        totalReworkHours: Number(summary.totalReworkHours) || 0,
+      });
+    } catch (error) {
+      console.error(error);
+      if (isMountedRef.current) {
+        setPassRateRows([]);
+        setPassRateSummary({
+          contributors: 0,
+          avgPassRate: 0,
+          totalLabelHours: 0,
+          totalReworkHours: 0,
+        });
+      }
+    } finally {
+      if (isMountedRef.current) setIsPassRateLoading(false);
+    }
+  }, [job.jobId]);
+
+  const fetchPassRateStatus = useCallback(async () => {
+    try {
+      const API_BASE = typeof window === "undefined" ? "http://backend:5000" : "http://localhost:5000";
+      const res = await fetch(`${API_BASE}/api/jobs/${job.jobId}/pass-rate/status`);
+      if (!res.ok) return false;
+      const data = await res.json();
+      return Boolean(data?.running);
+    } catch (error) {
+      console.error("Pass-rate status check failed:", error);
+      return false;
+    }
+  }, [job.jobId]);
+
   useEffect(() => {
-    if (activeTab !== "overview" || isOverviewPanelHovered) return;
-    const timer = setInterval(() => {
-      setOverviewPanelIndex((prev) => (prev + 1) % 2);
-    }, 3500);
-    return () => clearInterval(timer);
-  }, [activeTab, isOverviewPanelHovered]);
+    loadPassRateData();
+  }, [loadPassRateData]);
+
+  useEffect(() => {
+    let alive = true;
+    const initStatus = async () => {
+      const running = await fetchPassRateStatus();
+      if (!alive) return;
+      setIsPassRateSyncing(running);
+    };
+    initStatus();
+    return () => {
+      alive = false;
+    };
+  }, [fetchPassRateStatus]);
+
+  useEffect(() => {
+    if (!isPassRateSyncing) return;
+    const interval = setInterval(async () => {
+      const running = await fetchPassRateStatus();
+      if (!running) {
+        setIsPassRateSyncing(false);
+        await loadPassRateData();
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [isPassRateSyncing, fetchPassRateStatus, loadPassRateData]);
 
   // Tự động cuộn xuống dưới cùng của panel log
   useEffect(() => {
@@ -252,29 +344,43 @@ function PackageDetail() {
       return;
     }
     setShowSyncPopup(false);
-    setIsSyncing(true);
-    setSyncProgress(1);
+    const shouldRunMainSync = syncOptions.kpi || syncOptions.qa1 || syncOptions.qa2;
+    if (shouldRunMainSync) {
+      setIsSyncing(true);
+      setSyncProgress(1);
+    }
     try {
       const API_BASE = typeof window === 'undefined' ? 'http://backend:5000' : 'http://localhost:5000';
-      const url = `${API_BASE}/api/jobs/${job.jobId}/sync${force ? '?force=true' : ''}`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(syncOptions)
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        if (err.requires_confirmation) {
-           const confirmStop = window.confirm(`Hệ thống đang đồng bộ gói hàng khác (${err.activeJobId || 'không rõ'}). Bạn có muốn dừng gói kia lại để đồng bộ gói hàng này không?`);
-           if (confirmStop) {
-               return handleSync(true);
-           } else {
-               setIsSyncing(false);
-               setSyncProgress(0);
-               return;
-           }
+      if (shouldRunMainSync) {
+        const url = `${API_BASE}/api/jobs/${job.jobId}/sync${force ? '?force=true' : ''}`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(syncOptions)
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          if (err.requires_confirmation) {
+             const confirmStop = window.confirm(`Hệ thống đang đồng bộ gói hàng khác (${err.activeJobId || 'không rõ'}). Bạn có muốn dừng gói kia lại để đồng bộ gói hàng này không?`);
+             if (confirmStop) {
+                 return handleSync(true);
+             } else {
+                 setIsSyncing(false);
+                 setSyncProgress(0);
+                 return;
+             }
+          }
+          throw new Error(err.error || "Lỗi đồng bộ");
         }
-        throw new Error(err.error || "Lỗi đồng bộ");
+      }
+
+      if (syncOptions.passRate) {
+        try {
+          await fetch(`${API_BASE}/api/jobs/${job.jobId}/pass-rate/sync`, { method: "POST" });
+          setIsPassRateSyncing(true);
+        } catch (error) {
+          console.error("Pass-rate sync failed:", error);
+        }
       }
     } catch (err: any) {
       console.error(err);
@@ -503,6 +609,16 @@ function PackageDetail() {
   }, [overviewList]);
 
   const overviewPanels = useMemo(() => {
+    const topPassRateUsers = passRateRows
+      .filter((row) => row.username && !hiddenUsersSet.has(row.username))
+      .sort((a, b) => b.passRate - a.passRate)
+      .slice(0, 3)
+      .map((row) => ({
+        username: row.username,
+        subtitle: "Pass-rate",
+        value: `${row.passRate.toFixed(2)}%`,
+      }));
+
     return [
       {
         title: "Top 3 người có KPI Label cao nhất",
@@ -513,6 +629,10 @@ function PackageDetail() {
         })),
       },
       {
+        title: "Top 3 người có tỉ lệ chính xác cao nhất",
+        rows: topPassRateUsers,
+      },
+      {
         title: "Top 3 người có KPI QA cao nhất",
         rows: topKpiQaWorkers.map((u) => ({
           username: u.username,
@@ -521,7 +641,35 @@ function PackageDetail() {
         })),
       },
     ];
-  }, [topKpiLabelWorkers, topKpiQaWorkers]);
+  }, [hiddenUsersSet, passRateRows, topKpiLabelWorkers, topKpiQaWorkers]);
+
+  const passRateWorkList = useMemo(() => {
+    return passRateRows
+      .filter((row) => row.username && !hiddenUsersSet.has(row.username))
+      .map((row) => ({
+        username: row.username,
+        labelHours: row.labelHours || 0,
+        reworkHours: row.reworkHours || 0,
+        totalHours: (row.labelHours || 0) + (row.reworkHours || 0),
+      }))
+      .sort((a, b) => b.totalHours - a.totalHours);
+  }, [hiddenUsersSet, passRateRows]);
+
+  const shouldShowSyncLogs =
+    isSyncing ||
+    isPassRateSyncing ||
+    syncLogs.kpi.length > 0 ||
+    syncLogs.qa1.length > 0 ||
+    syncLogs.qa2.length > 0 ||
+    syncLogs.pass_rate.length > 0;
+
+  useEffect(() => {
+    if (activeTab !== "overview" || isOverviewPanelHovered) return;
+    const timer = setInterval(() => {
+      setOverviewPanelIndex((prev) => (prev + 1) % Math.max(overviewPanels.length, 1));
+    }, 3500);
+    return () => clearInterval(timer);
+  }, [activeTab, isOverviewPanelHovered, overviewPanels.length]);
 
   return (
     <main className="mx-auto max-w-6xl px-6 py-12 md:py-16">
@@ -768,11 +916,18 @@ function PackageDetail() {
                             <span className="text-[11px] text-muted-foreground">{job.qa2JobId || "Chưa thiết lập"}</span>
                           </div>
                         </label>
+                        <label className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-muted/50 cursor-pointer transition-colors">
+                          <input type="checkbox" checked={syncOptions.passRate} onChange={e => setSyncOptions(s => ({...s, passRate: e.target.checked}))} className="rounded border-input text-blue-600 focus:ring-blue-500 h-4 w-4" />
+                          <div className="flex flex-col">
+                            <span className="text-[13px] font-semibold">Cập nhật tỉ lệ chính xác</span>
+                            <span className="text-[11px] text-muted-foreground">Lấy từ bảng Monitor</span>
+                          </div>
+                        </label>
                       </div>
                       <div className="p-3 border-t border-border bg-muted/20">
                         <button
                           onClick={() => handleSync(false)}
-                          disabled={!isServerOnline || (!syncOptions.kpi && !syncOptions.qa1 && !syncOptions.qa2)}
+                          disabled={!isServerOnline || (!syncOptions.kpi && !syncOptions.qa1 && !syncOptions.qa2 && !syncOptions.passRate)}
                           className="w-full rounded-lg bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2"
                         >
                           Bắt đầu đồng bộ
@@ -836,12 +991,12 @@ function PackageDetail() {
 
       {/* Sync Logs Panels */}
       <AnimatePresence>
-        {isSyncing && (
+        {shouldShowSyncLogs && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4"
+            className="mt-6 grid grid-cols-1 md:grid-cols-4 gap-4"
           >
             {/* KPI Logs */}
             <div className="flex flex-col rounded-xl overflow-hidden border border-border bg-black">
@@ -910,6 +1065,28 @@ function PackageDetail() {
                 )}
               </div>
             </div>
+
+            {/* Pass-rate Logs */}
+            <div className="flex flex-col rounded-xl overflow-hidden border border-border bg-black">
+              <div className="bg-zinc-900 px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
+                <span className="text-xs font-mono font-semibold text-sky-400">Pass-rate Sync</span>
+                {isPassRateSyncing && (
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-sky-500"></span>
+                  </span>
+                )}
+              </div>
+              <div className="log-container h-48 overflow-y-auto p-3 font-mono text-[11px] text-zinc-300 space-y-1">
+                {syncLogs.pass_rate?.length === 0 ? (
+                  <div className="text-zinc-600 italic">Đang chờ khởi chạy...</div>
+                ) : (
+                  syncLogs.pass_rate?.map((log, i) => (
+                    <div key={i}>{log}</div>
+                  ))
+                )}
+              </div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -921,15 +1098,34 @@ function PackageDetail() {
           transition={{ duration: 0.4, delay: 0.08 }}
           className="mt-6 grid gap-4 md:grid-cols-2"
         >
-          <div
-            onClick={() => setShowUserPopup(true)}
-            className="relative cursor-pointer overflow-hidden rounded-2xl border border-border/60 bg-card p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg"
-          >
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500/15 to-blue-500/5 text-blue-600 dark:text-blue-400">
-              <Users className="h-5 w-5" />
+          <div className="relative overflow-hidden rounded-2xl border border-border/60 bg-card p-5 shadow-sm">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500/15 to-blue-500/5 text-blue-600 dark:text-blue-400">
+                <Users className="h-5 w-5" />
+              </div>
+              <p className="text-sm font-semibold text-foreground">Thời gian làm việc theo user</p>
             </div>
-            <p className="mt-3 text-2xl font-bold tabular-nums tracking-tight">{jobTotals.totalUsers}</p>
-            <p className="mt-0.5 text-xs font-medium text-muted-foreground">Tổng số người làm</p>
+            <div className="mt-3">
+              <div className="mt-2 max-h-56 space-y-2 overflow-y-auto pr-1">
+                {passRateWorkList.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">Chưa có dữ liệu</p>
+                ) : (
+                  passRateWorkList.map((row) => (
+                    <div key={row.username} className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/20 px-3 py-2">
+                      <div className="leading-tight">
+                        <p className="text-xs font-semibold text-foreground">{row.username}</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          Label {row.labelHours.toFixed(2)}h | Rework {row.reworkHours.toFixed(2)}h
+                        </p>
+                      </div>
+                      <p className="text-xs font-semibold tabular-nums text-foreground">
+                        {row.totalHours.toFixed(2)}h
+                      </p>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
             <div className="absolute -right-4 -top-4 h-20 w-20 rounded-full bg-gradient-to-br from-blue-500/15 to-blue-500/5 opacity-20 blur-2xl" />
           </div>
 
@@ -1003,7 +1199,7 @@ function PackageDetail() {
               <tbody>
                 <tr>
                   <td className="py-12 text-center text-muted-foreground">
-                    Tổng quan đã được rút gọn. Vui lòng xem 2 thẻ phía trên: Tổng số người làm và slider Top 3.
+                    Tổng quan đã được rút gọn. Vui lòng xem 2 thẻ phía trên: Pass-rate và slider Top 3.
                   </td>
                 </tr>
               </tbody>
