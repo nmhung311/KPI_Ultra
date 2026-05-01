@@ -67,6 +67,29 @@ function PackageDetail() {
   const [showSyncPopup, setShowSyncPopup] = useState(false);
   const [showUserPopup, setShowUserPopup] = useState(false);
   const [isTogglingHide, setIsTogglingHide] = useState(false);
+  const [isServerOnline, setIsServerOnline] = useState(false);
+  const [isCheckingServer, setIsCheckingServer] = useState(true);
+
+  const checkAppenServerOnline = async () => {
+    try {
+      const API_BASE = typeof window === "undefined" ? "http://backend:5000" : "http://localhost:5000";
+      const res = await fetch(`${API_BASE}/api/server/appen-health`);
+      if (!res.ok) {
+        setIsServerOnline(false);
+        return false;
+      }
+      const data = await res.json();
+      const online = Boolean(data?.online);
+      setIsServerOnline(online);
+      return online;
+    } catch (error) {
+      console.error("Server health check failed:", error);
+      setIsServerOnline(false);
+      return false;
+    } finally {
+      setIsCheckingServer(false);
+    }
+  };
 
   const toggleHiddenUser = async (username: string) => {
     try {
@@ -197,6 +220,14 @@ function PackageDetail() {
     return () => clearInterval(interval);
   }, [isSyncing, router, job.jobId]);
 
+  useEffect(() => {
+    checkAppenServerOnline();
+    const timer = setInterval(() => {
+      checkAppenServerOnline();
+    }, 30000);
+    return () => clearInterval(timer);
+  }, []);
+
   // Tự động cuộn xuống dưới cùng của panel log
   useEffect(() => {
     if (isSyncing) {
@@ -209,6 +240,10 @@ function PackageDetail() {
   }, [syncLogs, isSyncing]);
 
   const handleSync = async (force = false) => {
+    if (!isServerOnline) {
+      alert("Server Appen đang offline. Chỉ có thể đồng bộ khi đèn trạng thái sáng.");
+      return;
+    }
     setShowSyncPopup(false);
     setIsSyncing(true);
     setSyncProgress(1);
@@ -641,8 +676,16 @@ function PackageDetail() {
                       transition={{ duration: 0.15 }}
                       className="absolute right-0 top-full mt-2 w-64 rounded-xl border border-border bg-popover shadow-xl z-50 overflow-hidden"
                     >
-                      <div className="p-3 bg-muted/30 border-b border-border text-sm font-semibold text-foreground">
-                        Tùy chọn đồng bộ
+                      <div className="p-3 bg-muted/30 border-b border-border">
+                        <div className="text-sm font-semibold text-foreground">Tùy chọn đồng bộ</div>
+                        <div className="mt-1 inline-flex items-center gap-2 text-xs text-muted-foreground">
+                          <span
+                            className={`h-2.5 w-2.5 rounded-full ${isCheckingServer ? "bg-amber-400 animate-pulse" : isServerOnline ? "bg-emerald-500" : "bg-red-500"}`}
+                          />
+                          <span>
+                            {isCheckingServer ? "Đang kiểm tra server..." : isServerOnline ? "VPN đã bật" : "VPN đã tắt"}
+                          </span>
+                        </div>
                       </div>
                       <div className="p-2 flex flex-col">
                         <label className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-muted/50 cursor-pointer transition-colors">
@@ -670,7 +713,7 @@ function PackageDetail() {
                       <div className="p-3 border-t border-border bg-muted/20">
                         <button
                           onClick={() => handleSync(false)}
-                          disabled={!syncOptions.kpi && !syncOptions.qa1 && !syncOptions.qa2}
+                          disabled={!isServerOnline || (!syncOptions.kpi && !syncOptions.qa1 && !syncOptions.qa2)}
                           className="w-full rounded-lg bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2"
                         >
                           Bắt đầu đồng bộ

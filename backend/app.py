@@ -11,6 +11,8 @@ import io
 import json
 from datetime import datetime
 from pymongo.errors import PyMongoError
+import requests
+from requests.exceptions import RequestException
 
 app = Flask(__name__)
 CORS(app)
@@ -155,6 +157,28 @@ def clear_sync_status(job_id):
 def get_sync_logs(job_id):
     # Trả về toàn bộ log hiện tại
     return jsonify(sync_logs)
+
+@app.route('/api/server/appen-health', methods=['GET'])
+def check_appen_health():
+    """Kiểm tra Appen login page còn online không."""
+    target_url = "http://global-autolabeling-service.evad.xiaomi.srv/appen/ui#/user/login"
+    try:
+        response = requests.get(target_url, timeout=8, allow_redirects=True)
+        is_online = response.status_code == 200
+        return jsonify({
+            "online": is_online,
+            "statusCode": response.status_code,
+            "url": target_url,
+            "checkedAt": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }), 200
+    except RequestException as e:
+        return jsonify({
+            "online": False,
+            "statusCode": None,
+            "url": target_url,
+            "error": str(e),
+            "checkedAt": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }), 200
 
 @app.route('/results', methods=['GET'])
 def get_results():
