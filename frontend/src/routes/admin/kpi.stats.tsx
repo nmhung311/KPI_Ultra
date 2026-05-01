@@ -5,11 +5,9 @@ import {
   ArrowLeft,
   BarChart3,
   Calendar,
-  Users,
   Tag,
   ShieldCheck,
   TrendingUp,
-  FileText,
   Download,
   Search,
   ChevronUp,
@@ -252,7 +250,7 @@ function KpiStatsPage() {
           <BarChart3 className="h-3.5 w-3.5" /> <span>Thống kê KPI</span>
         </div>
         <h1 className="mt-4 bg-gradient-to-br from-foreground to-foreground/70 bg-clip-text text-4xl font-bold tracking-tight text-transparent md:text-5xl">
-          Thống kê nhân sự.
+          Thống kê KPI
         </h1>
         <p className="mt-3 max-w-2xl text-lg text-muted-foreground">
           Tổng hợp KPI Label và KPI QA của toàn bộ nhân sự theo tháng, gộp từ tất cả các gói hàng.
@@ -330,58 +328,28 @@ function KpiStatsPage() {
         className="mt-8 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6"
       >
         <SummaryCard
-          icon={<Users className="h-5 w-5" />}
-          label="Nhân sự"
-          value={stats.totals.totalUsers}
-          color="blue"
-          delay={0}
-        />
-        <SummaryCard
-          icon={<Package className="h-5 w-5" />}
-          label="Gói hàng"
-          value={stats.totals.totalJobs}
-          color="violet"
-          delay={0.05}
-        />
-        <SummaryCard
-          icon={<FileText className="h-5 w-5" />}
-          label="Tổng Records"
-          value={stats.totals.totalRecords}
-          color="rose"
-          delay={0.1}
-        />
-        <SummaryCard
           icon={<Tag className="h-5 w-5" />}
           label="Tổng KPI Label"
           value={stats.totals.totalKpiLabel}
           color="emerald"
-          delay={0.15}
+          delay={0}
         />
         <SummaryCard
           icon={<ShieldCheck className="h-5 w-5" />}
-          label="Tổng KPI QA1"
+          label="Tổng KPI QA"
           value={stats.totals.totalKpiQA1}
           color="amber"
-          delay={0.2}
+          delay={0.05}
           onClick={() => setQaModalType("qa1")}
           clickable
         />
         <SummaryCard
           icon={<ShieldCheck className="h-5 w-5" />}
-          label="Tổng KPI QA1 (KH)"
+          label="Tổng KPI QA (KH)"
           value={stats.totals.totalKpiQA1Customer || 0}
           color="amber"
-          delay={0.22}
+          delay={0.1}
           onClick={() => setQaModalType("qa1_customer")}
-          clickable
-        />
-        <SummaryCard
-          icon={<ShieldCheck className="h-5 w-5" />}
-          label="Tổng KPI QA2"
-          value={stats.totals.totalKpiQA2}
-          color="amber"
-          delay={0.24}
-          onClick={() => setQaModalType("qa2")}
           clickable
         />
         <SummaryCard
@@ -389,7 +357,7 @@ function KpiStatsPage() {
           label="Tổng KPI Khách hàng"
           value={stats.totals.totalKpiCustomer || 0}
           color="cyan"
-          delay={0.26}
+          delay={0.15}
         />
       </motion.div>
 

@@ -4,7 +4,7 @@ import { initReactI18next } from 'react-i18next';
 const resources = {
   vi: {
     translation: {
-      "kpi_dashboard": "KPI & Gói Hàng.",
+      "kpi_dashboard": "KPI & Gói Hàng",
       "kpi_desc": "Theo dõi tiến độ, chất lượng và thống kê KPI theo từng gói công việc (Package Workflow).",
       "manage_package": "Quản lý Gói hàng",
       "package_list": "Danh sách gói hàng",

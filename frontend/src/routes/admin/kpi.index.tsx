@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { createFileRoute, useNavigate, useRouter } from "@tanstack/react-router";
 import { motion } from "framer-motion";
 import {
@@ -50,8 +50,21 @@ function AdminKpiList() {
   const [isUploading, setIsUploading] = useState(false);
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
+  const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const restoreFileInputRef = useRef<HTMLInputElement>(null);
+  const backupMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isBackupModalOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (backupMenuRef.current && !backupMenuRef.current.contains(event.target as Node)) {
+        setIsBackupModalOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [isBackupModalOpen]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -176,18 +189,11 @@ function AdminKpiList() {
         <h1 className="mt-4 bg-gradient-to-br from-foreground to-foreground/70 bg-clip-text text-4xl font-bold tracking-tight text-transparent md:text-5xl">
           {t("kpi_dashboard")}
         </h1>
-        <p className="mt-3 max-w-2xl text-lg text-muted-foreground">
-          {t("kpi_desc")}
-        </p>
       </motion.div>
 
       {/* Package List Grid */}
       <section className="mt-12 relative z-10">
         <div className="mb-6 flex flex-col items-start justify-between gap-4 md:flex-row md:items-center">
-          <h2 className="text-2xl font-semibold tracking-tight">
-            {t("package_list")}
-          </h2>
-          
           <div className="flex flex-wrap items-center gap-3">
             {/* Search */}
             <div className="flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 shadow-sm transition-all hover:shadow-md">
@@ -241,33 +247,56 @@ function AdminKpiList() {
               Thống kê
             </button>
 
-            <button
-              type="button"
-              onClick={handleFullBackup}
-              disabled={isBackingUp || isRestoring}
-              className={`group inline-flex items-center gap-2 rounded-full border border-border bg-card px-5 py-2.5 text-sm font-semibold text-foreground shadow-sm transition-all hover:bg-muted hover:shadow-md ${isBackingUp || isRestoring ? "opacity-70 cursor-not-allowed" : ""}`}
-            >
-              <DatabaseBackup className={`h-4 w-4 ${isBackingUp ? "animate-pulse" : ""}`} />
-              {isBackingUp ? t("backing_up") : t("backup_all_kpi")}
-            </button>
-
-            <div>
-              <input
-                type="file"
-                accept=".json,application/json"
-                className="hidden"
-                ref={restoreFileInputRef}
-                onChange={handleRestoreFile}
-              />
+            <div className="relative" ref={backupMenuRef}>
               <button
                 type="button"
-                onClick={() => restoreFileInputRef.current?.click()}
-                disabled={isRestoring || isBackingUp}
-                className={`group inline-flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-5 py-2.5 text-sm font-semibold text-amber-900 shadow-sm transition-all hover:bg-amber-500/20 dark:text-amber-100 ${isRestoring ? "opacity-70 cursor-not-allowed" : ""}`}
+                onClick={() => setIsBackupModalOpen((prev) => !prev)}
+                disabled={isBackingUp || isRestoring}
+                className={`group inline-flex items-center gap-2 rounded-full border border-border bg-card px-5 py-2.5 text-sm font-semibold text-foreground shadow-sm transition-all hover:bg-muted hover:shadow-md ${isBackingUp || isRestoring ? "opacity-70 cursor-not-allowed" : ""}`}
               >
-                <ArchiveRestore className={`h-4 w-4 ${isRestoring ? "animate-pulse" : ""}`} />
-                {isRestoring ? t("restoring") : t("restore_kpi_backup")}
+                <DatabaseBackup className={`h-4 w-4 ${isBackingUp || isRestoring ? "animate-pulse" : ""}`} />
+                {isBackingUp ? t("backing_up") : isRestoring ? t("restoring") : "Backup"}
               </button>
+
+              {isBackupModalOpen ? (
+                <div className="absolute right-0 top-full z-40 mt-2 w-72 rounded-2xl border border-border bg-card p-4 shadow-2xl">
+                  <h3 className="text-sm font-semibold tracking-tight">Quản lý backup KPI</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">Chọn thao tác bạn muốn thực hiện.</p>
+                  <div className="mt-3 grid gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await handleFullBackup();
+                        setIsBackupModalOpen(false);
+                      }}
+                      disabled={isBackingUp || isRestoring}
+                      className={`inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 py-2.5 text-sm font-semibold text-foreground transition-all hover:bg-muted ${isBackingUp || isRestoring ? "opacity-70 cursor-not-allowed" : ""}`}
+                    >
+                      <DatabaseBackup className={`h-4 w-4 ${isBackingUp ? "animate-pulse" : ""}`} />
+                      {isBackingUp ? t("backing_up") : t("backup_all_kpi")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsBackupModalOpen(false);
+                        restoreFileInputRef.current?.click();
+                      }}
+                      disabled={isRestoring || isBackingUp}
+                      className={`inline-flex items-center justify-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm font-semibold text-amber-900 transition-all hover:bg-amber-500/20 dark:text-amber-100 ${isRestoring || isBackingUp ? "opacity-70 cursor-not-allowed" : ""}`}
+                    >
+                      <ArchiveRestore className={`h-4 w-4 ${isRestoring ? "animate-pulse" : ""}`} />
+                      {isRestoring ? t("restoring") : t("restore_kpi_backup")}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsBackupModalOpen(false)}
+                    className="mt-2 w-full rounded-xl border border-border px-4 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    Đóng
+                  </button>
+                </div>
+              ) : null}
             </div>
 
             {/* Import Button */}
@@ -290,7 +319,15 @@ function AdminKpiList() {
             </div>
           </div>
         </div>
-        
+
+        <input
+          type="file"
+          accept=".json,application/json"
+          className="hidden"
+          ref={restoreFileInputRef}
+          onChange={handleRestoreFile}
+        />
+
         {filteredJobs.length === 0 ? (
           <motion.div 
             initial={{ opacity: 0, scale: 0.95 }}

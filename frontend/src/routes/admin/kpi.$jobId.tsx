@@ -3,7 +3,6 @@ import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-rout
 import { motion, AnimatePresence } from "framer-motion";
 import { 
   ArrowLeft, 
-  Layers, 
   Package, 
   Users, 
   FileText, 
@@ -12,8 +11,6 @@ import {
   X,
   Download,
   RefreshCw,
-  Tag,
-  ShieldCheck,
   TrendingUp,
   Eye,
   EyeOff,
@@ -69,6 +66,8 @@ function PackageDetail() {
   const [isTogglingHide, setIsTogglingHide] = useState(false);
   const [isServerOnline, setIsServerOnline] = useState(false);
   const [isCheckingServer, setIsCheckingServer] = useState(true);
+  const [overviewPanelIndex, setOverviewPanelIndex] = useState(0);
+  const [isOverviewPanelHovered, setIsOverviewPanelHovered] = useState(false);
 
   const checkAppenServerOnline = async () => {
     try {
@@ -227,6 +226,14 @@ function PackageDetail() {
     }, 30000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (activeTab !== "overview" || isOverviewPanelHovered) return;
+    const timer = setInterval(() => {
+      setOverviewPanelIndex((prev) => (prev + 1) % 2);
+    }, 3500);
+    return () => clearInterval(timer);
+  }, [activeTab, isOverviewPanelHovered]);
 
   // Tự động cuộn xuống dưới cùng của panel log
   useEffect(() => {
@@ -404,6 +411,17 @@ function PackageDetail() {
     }));
   }, [job]);
 
+  const hiddenUsersSet = useMemo(() => new Set(job.hiddenUsers || []), [job.hiddenUsers]);
+
+  // Nguồn dữ liệu đang hiển thị ở bảng records (đã filter).
+  const filteredRecords = useMemo(() => {
+    return job.records.filter((rec) => {
+      const worker = rec.worker?.trim();
+      if (!worker) return false;
+      return !hiddenUsersSet.has(worker);
+    });
+  }, [job.records, hiddenUsersSet]);
+
   // Tổng quan: gộp tất cả user (label + QA) với KPI Label, KPI QA1 và KPI QA2 tách riêng
   const overviewList = useMemo(() => {
     const userMap = new Map<string, { username: string, role: string, kpiLabel: number, kpiQA1: number, kpiQA2: number, recordsLB: number, recordsQA1: number, recordsQA2: number, isHidden: boolean }>();
@@ -460,6 +478,51 @@ function PackageDetail() {
     };
   }, [overviewList, job.records]);
 
+  const topKpiLabelWorkers = useMemo(() => {
+    return overviewList
+      .filter((u) => !u.isHidden)
+      .map((u) => ({
+        username: u.username,
+        role: u.role,
+        value: u.kpiLabel,
+      }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 3);
+  }, [overviewList]);
+
+  const topKpiQaWorkers = useMemo(() => {
+    return overviewList
+      .filter((u) => !u.isHidden)
+      .map((u) => ({
+        username: u.username,
+        role: u.role,
+        value: u.kpiQA1 + u.kpiQA2,
+      }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 3);
+  }, [overviewList]);
+
+  const overviewPanels = useMemo(() => {
+    return [
+      {
+        title: "Top 3 người có KPI Label cao nhất",
+        rows: topKpiLabelWorkers.map((u) => ({
+          username: u.username,
+          subtitle: u.role,
+          value: `${u.value}`,
+        })),
+      },
+      {
+        title: "Top 3 người có KPI QA cao nhất",
+        rows: topKpiQaWorkers.map((u) => ({
+          username: u.username,
+          subtitle: u.role,
+          value: `${u.value}`,
+        })),
+      },
+    ];
+  }, [topKpiLabelWorkers, topKpiQaWorkers]);
+
   return (
     <main className="mx-auto max-w-6xl px-6 py-12 md:py-16">
       <Link
@@ -479,10 +542,6 @@ function PackageDetail() {
           <Package className="h-8 w-8" />
         </div>
         <div>
-          <div className="flex items-center gap-2 text-[12px] font-medium tracking-widest text-accent uppercase">
-            <Layers className="h-4 w-4" /> {t("package_details")}
-          </div>
-          
           {isEditingHeader ? (
             <div className="mt-3 flex flex-col gap-3">
               <div className="flex flex-col gap-3">
@@ -855,49 +914,82 @@ function PackageDetail() {
         )}
       </AnimatePresence>
 
-      {/* Summary Cards */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.08 }}
-        className="mt-6 grid grid-cols-2 gap-4 md:grid-cols-4"
-      >
-        <div 
-          onClick={() => setShowUserPopup(true)}
-          className="relative overflow-hidden rounded-2xl border border-border/60 bg-card p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg cursor-pointer"
+      {activeTab === "overview" ? (
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.08 }}
+          className="mt-6 grid gap-4 md:grid-cols-2"
         >
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500/15 to-blue-500/5 text-blue-600 dark:text-blue-400">
-            <Users className="h-5 w-5" />
+          <div
+            onClick={() => setShowUserPopup(true)}
+            className="relative cursor-pointer overflow-hidden rounded-2xl border border-border/60 bg-card p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg"
+          >
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500/15 to-blue-500/5 text-blue-600 dark:text-blue-400">
+              <Users className="h-5 w-5" />
+            </div>
+            <p className="mt-3 text-2xl font-bold tabular-nums tracking-tight">{jobTotals.totalUsers}</p>
+            <p className="mt-0.5 text-xs font-medium text-muted-foreground">Tổng số người làm</p>
+            <div className="absolute -right-4 -top-4 h-20 w-20 rounded-full bg-gradient-to-br from-blue-500/15 to-blue-500/5 opacity-20 blur-2xl" />
           </div>
-          <p className="mt-3 text-2xl font-bold tabular-nums tracking-tight">{jobTotals.totalUsers}</p>
-          <p className="mt-0.5 text-xs font-medium text-muted-foreground">Tổng số người làm</p>
-          <div className="absolute -right-4 -top-4 h-20 w-20 rounded-full bg-gradient-to-br from-blue-500/15 to-blue-500/5 opacity-20 blur-2xl" />
-        </div>
-        <div className="relative overflow-hidden rounded-2xl border border-border/60 bg-card p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500/15 to-emerald-500/5 text-emerald-600 dark:text-emerald-400">
-            <Tag className="h-5 w-5" />
+
+          <div
+            className="relative overflow-hidden rounded-2xl border border-border/60 bg-card p-5 shadow-sm"
+            onMouseEnter={() => setIsOverviewPanelHovered(true)}
+            onMouseLeave={() => setIsOverviewPanelHovered(false)}
+          >
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500/15 to-violet-500/5 text-violet-600 dark:text-violet-400">
+              <TrendingUp className="h-5 w-5" />
+            </div>
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={overviewPanelIndex}
+                initial={{ opacity: 0, x: 12 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -12 }}
+                transition={{ duration: 0.25 }}
+              >
+                <p className="mt-3 text-sm font-semibold text-foreground">
+                  {overviewPanels[overviewPanelIndex]?.title}
+                </p>
+                <div className="mt-3 space-y-2">
+                  {(overviewPanels[overviewPanelIndex]?.rows?.length || 0) === 0 ? (
+                    <p className="text-sm text-muted-foreground">Chưa có dữ liệu</p>
+                  ) : (
+                    overviewPanels[overviewPanelIndex].rows.map((user, index) => (
+                      <div key={`${overviewPanelIndex}-${user.username}`} className="flex items-center justify-between rounded-xl border border-border/70 bg-muted/20 px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-violet-500/15 text-xs font-bold text-violet-600 dark:text-violet-400">
+                            {index + 1}
+                          </span>
+                          <div className="leading-tight">
+                            <p className="text-sm font-semibold text-foreground">{user.username}</p>
+                            <p className="text-xs text-muted-foreground">{user.subtitle}</p>
+                          </div>
+                        </div>
+                        <p className="text-sm font-bold tabular-nums text-violet-600 dark:text-violet-400">
+                          {user.value}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </motion.div>
+            </AnimatePresence>
+            <div className="mt-3 flex items-center justify-center gap-1.5">
+              {overviewPanels.map((_, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => setOverviewPanelIndex(idx)}
+                  aria-label={`Chuyển panel ${idx + 1}`}
+                  className={`h-1.5 rounded-full transition-all ${overviewPanelIndex === idx ? "w-5 bg-violet-500" : "w-1.5 bg-border hover:bg-violet-300"}`}
+                />
+              ))}
+            </div>
           </div>
-          <p className="mt-3 text-2xl font-bold tabular-nums tracking-tight text-emerald-600 dark:text-emerald-400">{jobTotals.totalKpiLabel}</p>
-          <p className="mt-0.5 text-xs font-medium text-muted-foreground">Tổng KPI Label</p>
-          <div className="absolute -right-4 -top-4 h-20 w-20 rounded-full bg-gradient-to-br from-emerald-500/15 to-emerald-500/5 opacity-20 blur-2xl" />
-        </div>
-        <div className="relative overflow-hidden rounded-2xl border border-border/60 bg-card p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-amber-500/15 to-amber-500/5 text-amber-600 dark:text-amber-400">
-            <ShieldCheck className="h-5 w-5" />
-          </div>
-          <p className="mt-3 text-2xl font-bold tabular-nums tracking-tight text-amber-600 dark:text-amber-400">{jobTotals.totalKpiQA}</p>
-          <p className="mt-0.5 text-xs font-medium text-muted-foreground">Tổng KPI QA</p>
-          <div className="absolute -right-4 -top-4 h-20 w-20 rounded-full bg-gradient-to-br from-amber-500/15 to-amber-500/5 opacity-20 blur-2xl" />
-        </div>
-        <div className="relative overflow-hidden rounded-2xl border border-border/60 bg-card p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500/15 to-violet-500/5 text-violet-600 dark:text-violet-400">
-            <TrendingUp className="h-5 w-5" />
-          </div>
-          <p className="mt-3 text-2xl font-bold tabular-nums tracking-tight text-violet-600 dark:text-violet-400">{jobTotals.totalKpiLabel + jobTotals.totalKpiQA}</p>
-          <p className="mt-0.5 text-xs font-medium text-muted-foreground">Tổng KPI</p>
-          <div className="absolute -right-4 -top-4 h-20 w-20 rounded-full bg-gradient-to-br from-violet-500/15 to-violet-500/5 opacity-20 blur-2xl" />
-        </div>
-      </motion.div>
+        </motion.div>
+      ) : null}
 
       <motion.div
         initial={{ opacity: 0, y: 20 }}
@@ -908,75 +1000,13 @@ function PackageDetail() {
         <div className="overflow-x-auto p-6 md:p-8">
           <table className="w-full text-left text-sm">
             {activeTab === 'overview' ? (
-              <>
-                <thead className="border-b border-border bg-muted/40 text-[13px] font-medium text-muted-foreground">
-                  <tr>
-                    <th className="px-5 py-4 w-16 text-center">STT</th>
-                    <th className="px-5 py-4">Username</th>
-                    <th className="px-5 py-4 text-center">Vai trò</th>
-                    <th className="px-5 py-4 text-center">Số records LB</th>
-                    <th className="px-5 py-4 text-center">Số records QA1</th>
-                    <th className="px-5 py-4 text-center">Số records QA2</th>
-                    <th className="px-5 py-4 text-right">KPI Label</th>
-                    <th className="px-5 py-4 text-right">KPI QA1</th>
-                    <th className="px-5 py-4 text-right">KPI QA2</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/60">
-                  {overviewList.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="py-12 text-center text-muted-foreground">
-                        Chưa có dữ liệu
-                      </td>
-                    </tr>
-                  ) : (
-                    overviewList.map((u, idx) => (
-                      <tr key={u.username} className="group transition-colors hover:bg-muted/30">
-                        <td className="px-5 py-4 text-center font-mono text-muted-foreground">
-                          {idx + 1}
-                        </td>
-                        <td className="px-5 py-4 font-semibold text-accent">
-                          <div className="flex items-center gap-2">
-                            {u.username}
-                            {u.isHidden && (
-                              <span className="rounded-full bg-red-500/10 px-2 py-0.5 text-[10px] font-bold uppercase text-red-500">
-                                Đã ẩn
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-5 py-4 text-center font-medium text-foreground/80">
-                          {u.role}
-                        </td>
-                        <td className="px-5 py-4 text-center font-medium text-foreground/90">
-                          {u.recordsLB || "—"}
-                        </td>
-                        <td className="px-5 py-4 text-center font-medium text-foreground/90">
-                          {u.recordsQA1 || "—"}
-                        </td>
-                        <td className="px-5 py-4 text-center font-medium text-foreground/90">
-                          {u.recordsQA2 || "—"}
-                        </td>
-                        <td className="px-5 py-4 text-right">
-                          <span className={`font-semibold tabular-nums ${u.isHidden ? 'text-muted-foreground line-through opacity-50' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                            {u.kpiLabel || "—"}
-                          </span>
-                        </td>
-                        <td className="px-5 py-4 text-right">
-                          <span className={`font-semibold tabular-nums ${u.isHidden ? 'text-muted-foreground line-through opacity-50' : 'text-amber-600 dark:text-amber-400'}`}>
-                            {u.kpiQA1 || "—"}
-                          </span>
-                        </td>
-                        <td className="px-5 py-4 text-right">
-                          <span className={`font-semibold tabular-nums ${u.isHidden ? 'text-muted-foreground line-through opacity-50' : 'text-amber-600 dark:text-amber-400'}`}>
-                            {u.kpiQA2 || "—"}
-                          </span>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </>
+              <tbody>
+                <tr>
+                  <td className="py-12 text-center text-muted-foreground">
+                    Tổng quan đã được rút gọn. Vui lòng xem 2 thẻ phía trên: Tổng số người làm và slider Top 3.
+                  </td>
+                </tr>
+              </tbody>
             ) : activeTab === 'records' ? (
               <>
                 <thead className="border-b border-border bg-muted/40 text-[13px] font-medium text-muted-foreground">
@@ -991,7 +1021,7 @@ function PackageDetail() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/60">
-                  {job.records.map((rec) => (
+                  {filteredRecords.map((rec) => (
                     <tr key={rec.recordId} className="group transition-colors hover:bg-muted/30">
                       <td className="px-5 py-4">
                         <span className="font-mono font-medium text-foreground/90">{rec.recordId}</span>

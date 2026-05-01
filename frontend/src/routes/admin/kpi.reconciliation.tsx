@@ -162,15 +162,9 @@ function ReconciliationPage() {
 
       {/* Header */}
       <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }} className="mt-8">
-        <div className="inline-flex items-center gap-2 rounded-full border border-accent/20 bg-accent/10 px-3 py-1 text-[12px] font-medium tracking-widest text-accent uppercase backdrop-blur-md">
-          <GitCompareArrows className="h-3.5 w-3.5" /> <span>Đối soát KPI</span>
-        </div>
         <h1 className="mt-4 bg-gradient-to-br from-foreground to-foreground/70 bg-clip-text text-4xl font-bold tracking-tight text-transparent md:text-5xl">
-          Đối soát KPI.
+          Đối soát KPI
         </h1>
-        <p className="mt-3 max-w-2xl text-lg text-muted-foreground">
-          So sánh KPI hệ thống đếm và KPI khách hàng đếm. Chênh lệch &gt;10% là bất thường, &gt;5% tạm chấp nhận, &gt;2% chấp nhận, &lt;2% tốt.
-        </p>
       </motion.div>
 
       {/* Toolbar */}
@@ -198,19 +192,6 @@ function ReconciliationPage() {
             </button>
           </div>
         </div>
-      </motion.div>
-
-      {/* Legend */}
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }} className="mt-6 flex flex-wrap gap-3">
-        {(["good", "ok", "acceptable", "abnormal"] as const).map((s) => {
-          const c = STATUS_CONFIG[s];
-          const Icon = c.icon;
-          return (
-            <div key={s} className={`inline-flex items-center gap-1.5 rounded-full ${c.bg} border ${c.border} px-3 py-1 text-xs font-medium ${c.text}`}>
-              <Icon className="h-3 w-3" /> {c.label} {s === "good" ? "(<2%)" : s === "ok" ? "(2-5%)" : s === "acceptable" ? "(5-10%)" : "(>10%)"}
-            </div>
-          );
-        })}
       </motion.div>
 
       {/* Job Tables */}
