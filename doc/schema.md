@@ -86,4 +86,26 @@ collections:
         type: String
         description: "Thời gian làm xong record đó"
         default: ""
+
+  users:
+    description: "Danh sách nhân sự cố định: map username (Current Worker / QA) với Telegram để bot gửi KPI."
+    fields:
+      _id:
+        type: ObjectId
+        description: "MongoDB unique identifier"
+      username:
+        type: String
+        description: "Username Appen / hệ thống (trùng với Current Worker hoặc QA trong results)"
+        required: true
+        unique: true
+      id_telegram:
+        type: Long | Integer
+        description: "Chat ID Telegram (số) dùng gửi tin qua Bot API"
+        required: true
+      createdAt:
+        type: Date
+        description: "Thời điểm tạo bản ghi (chỉ ghi khi insert lần đầu)"
+      updatedAt:
+        type: Date
+        description: "Cập nhật lần cuối (seed hoặc API)"
 ```

@@ -1,19 +1,23 @@
-from flask import Flask, request, jsonify, make_response
-from bson import json_util
+from flask import Flask, request, jsonify, make_response, Response
+from bson import json_util, ObjectId
 from flask_cors import CORS
-from pymongo import MongoClient
+from pymongo import MongoClient, UpdateOne
 from automation import KPIAutomation
 import os
 import threading
 import time
 import csv
+import math
 import io
+import importlib.util
 import json
 from pathlib import Path
 from datetime import datetime
-from pymongo.errors import PyMongoError
+from pymongo.errors import BulkWriteError, DocumentTooLarge, PyMongoError
 import requests
 from requests.exceptions import RequestException
+
+from kpi_restore_core import restore_kpi_payload, verify_restored_data_matches_payload
 
 app = Flask(__name__)
 CORS(app)
@@ -23,6 +27,22 @@ mongo_uri = os.getenv('MONGO_URI', 'mongodb://localhost:27017/kpi_db')
 client = MongoClient(mongo_uri)
 db = client.kpi_db
 collection = db.results
+
+_telegram_kpi_core_module = None
+
+
+def get_telegram_kpi_core():
+    """Load module từ thư mục `Bot telegram/` (tên thư mục có khoảng trắng)."""
+    global _telegram_kpi_core_module
+    if _telegram_kpi_core_module is None:
+        core_path = Path(__file__).resolve().parent / "Bot telegram" / "telegram_kpi_core.py"
+        spec = importlib.util.spec_from_file_location("telegram_kpi_core_impl", core_path)
+        if spec is None or spec.loader is None:
+            raise ImportError("Không load được Bot telegram/telegram_kpi_core.py")
+        _telegram_kpi_core_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_telegram_kpi_core_module)
+    return _telegram_kpi_core_module
+
 
 # Theo dõi bot đang hoạt động
 active_bot = None
@@ -61,10 +81,183 @@ def _serialize_error(message, code=500):
     return jsonify({"error": message}), code
 
 
-def _to_float(value, default=0.0):
+def _restore_mongo_detail(exc: BaseException) -> str:
+    """Thông tin thêm từ BulkWriteError để hiển thị cho người dùng / log."""
+    if isinstance(exc, BulkWriteError):
+        wes = (exc.details or {}).get("writeErrors") or []
+        if wes:
+            return f" | writeErrors[0]: {wes[0].get('errmsg', wes[0])}"
+    return ""
+
+
+def _mongo_connection_hint(exc) -> str:
+    """Gợi ý khi PyMongo báo không phân giải được hostname (vd. mongodb trong Compose)."""
+    msg = str(exc).lower()
+    needles = (
+        "no address associated",
+        "errno -5",
+        "name or service not known",
+        "getaddrinfo",
+        "enotfound",
+        "nodename nor servname",
+        "name resolution",
+    )
+    if not any(n in msg for n in needles):
+        return ""
+    return (
+        " [Gợi ý] Tên `mongodb` trong MONGO_URI chỉ phân giải được khi backend chạy **trong** Docker Compose. "
+        "Nếu bạn chạy `python app.py` trên máy host: đặt MONGO_URI=mongodb://127.0.0.1:27017/kpi_db. "
+        "Nếu dùng Docker: `docker compose up -d` và `docker compose ps` (mongodb phải Up/healthy)."
+    )
+
+
+def _to_jsonable(value):
+    """Chuyển BSON / datetime / Decimal128 thành kiểu an toàn cho jsonify (tránh 500 do TypeError)."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {k: _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, set):
+        return [_to_jsonable(v) for v in sorted(value, key=lambda x: (str(type(x)), str(x)))]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, ObjectId):
+        return str(value)
     try:
-        if value is None:
-            return default
+        from bson.decimal128 import Decimal128
+
+        if isinstance(value, Decimal128):
+            return float(value.to_decimal())
+    except (AttributeError, ValueError, TypeError, OverflowError):
+        pass
+    try:
+        from bson.int64 import Int64
+
+        if isinstance(value, Int64):
+            return int(value)
+    except (ImportError, TypeError, ValueError, OverflowError):
+        pass
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _telegram_chat_id_from_user_doc(doc: dict) -> int | None:
+    """Chat ID Telegram từ document `users` (hỗ trợ nhiều tên field / BSON)."""
+    if not doc:
+        return None
+    raw = doc.get("id_telegram")
+    if raw is None:
+        raw = doc.get("idTelegram") or doc.get("telegram_id") or doc.get("telegramId")
+    if raw is None:
+        for k, v in doc.items():
+            if k == "_id" or v is None:
+                continue
+            lk = str(k).lower().replace(" ", "_")
+            if lk in ("id_telegram", "idtelegram", "telegram_id", "telegramid") and str(v).strip() != "":
+                raw = v
+                break
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(str(raw).strip().replace(",", "").replace(" ", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _username_from_user_doc(doc: dict) -> str:
+    u = doc.get("username")
+    if u is None:
+        u = doc.get("Username")
+    return str(u or "").strip()
+
+
+def _load_users_telegram_lookup(client_db):
+    """
+    Đọc collection 'users' (tránh db.users nếu trùng thuộc tính Database).
+    Trả về (tg_exact dict, lookup(uname) -> int | None) có fallback không phân biệt hoa thường.
+    """
+    tg_exact: dict[str, int] = {}
+    try:
+        for d in client_db["users"].find({}):
+            u = _username_from_user_doc(d)
+            if not u:
+                continue
+            tid = _telegram_chat_id_from_user_doc(d)
+            if tid is None:
+                continue
+            tg_exact[u] = tid
+    except PyMongoError:
+        pass
+    tg_fold = {k.casefold(): v for k, v in tg_exact.items()}
+
+    def lookup(uname: str):
+        if not uname:
+            return None
+        if uname in tg_exact:
+            return tg_exact[uname]
+        return tg_fold.get(uname.casefold())
+
+    return tg_exact, lookup
+
+
+def _chunked(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
+
+
+def _mongo_import_batch_size() -> int:
+    """Số thao tác bulk_write mỗi lô (import CSV / reconciliation)."""
+    return max(100, min(8000, int(os.getenv("MONGO_IMPORT_BATCH", "2500"))))
+
+
+def _results_bulk_write_chunked(operations: list) -> None:
+    if not operations:
+        return
+    batch = _mongo_import_batch_size()
+    for chunk in _chunked(operations, batch):
+        db.results.bulk_write(chunk, ordered=False)
+
+
+def _jobs_bulk_write_chunked(operations: list) -> None:
+    if not operations:
+        return
+    batch = _mongo_import_batch_size()
+    for chunk in _chunked(operations, batch):
+        db.jobs.bulk_write(chunk, ordered=False)
+
+
+def _results_insert_many_chunked(docs: list) -> None:
+    if not docs:
+        return
+    batch = _mongo_import_batch_size()
+    for chunk in _chunked(docs, batch):
+        collection.insert_many(chunk, ordered=False)
+
+
+def _to_float(value, default=0.0):
+    if value is None:
+        return default
+    try:
+        from bson.decimal128 import Decimal128
+
+        if isinstance(value, Decimal128):
+            return float(value.to_decimal())
+    except (ImportError, AttributeError, ValueError, TypeError, OverflowError):
+        pass
+    try:
         return float(str(value).strip().replace(",", "."))
     except (TypeError, ValueError):
         return default
@@ -89,9 +282,8 @@ def run_automation():
         global active_bot, active_thread
         try:
             results = active_bot.run()
-            # Lưu vào MongoDB
             if results:
-                collection.insert_many(results)
+                _results_insert_many_chunked(results)
         except PyMongoError as e:
             print(f"Lỗi MongoDB khi lưu kết quả: {e}")
         except Exception as e:
@@ -199,38 +391,140 @@ def check_appen_health():
 def get_results():
     try:
         results = list(collection.find({}, {'_id': 0}))
-        return jsonify(results)
+        return jsonify(_to_jsonable(results))
     except PyMongoError as e:
-        return _serialize_error(f"Lỗi đọc dữ liệu MongoDB: {str(e)}", 500)
+        h = _mongo_connection_hint(e)
+        return _serialize_error(f"Lỗi đọc dữ liệu MongoDB: {e}" + (f". {h}" if h else ""), 500)
 
-@app.route('/api/jobs', methods=['GET'])
+def _month_from_received_str(received_str: str) -> str:
+    """Suy ra tháng hiển thị mm/yyyy từ chuỗi ngày nhận (cùng quy tắc import CSV)."""
+    received_str = (received_str or "").strip()
+    month_str = ""
+    try:
+        if "/" in received_str:
+            parts = received_str.split("/")
+            if len(parts) >= 2:
+                month_str = f"{parts[1].zfill(2)}/{parts[2]}" if len(parts) == 3 else f"{parts[0].zfill(2)}/{parts[1]}"
+        elif "-" in received_str:
+            parts = received_str.split("-")
+            if len(parts) >= 2:
+                if len(parts[0]) == 4:
+                    month_str = f"{parts[1].zfill(2)}/{parts[0]}"
+                else:
+                    month_str = f"{parts[1].zfill(2)}/{parts[2]}"
+    except Exception:
+        pass
+    if not month_str:
+        month_str = datetime.now().strftime("%m/%Y")
+    return month_str
+
+
+def _completed_at_calendar_day(completed_at):
+    """Chuẩn hóa ngày YYYY-MM-DD chỉ từ trường Completed At của record."""
+    s = (completed_at or "").strip()
+    if not s:
+        return None
+    date_part = s.replace("T", " ").split()[0].strip()
+    if len(date_part) >= 10 and date_part[4] == "-" and date_part[7] == "-":
+        try:
+            datetime.strptime(date_part[:10], "%Y-%m-%d")
+            return date_part[:10]
+        except ValueError:
+            pass
+    if "/" in date_part:
+        parts = [p.strip() for p in date_part.split("/") if p.strip() != ""]
+        if len(parts) >= 3:
+            try:
+                a, b, c = int(parts[0]), int(parts[1]), int(parts[2])
+                if a > 1000:
+                    y, mth, d = a, b, c
+                else:
+                    d, mth, y = a, b, c
+                    if y < 100:
+                        y += 2000
+                datetime(y, mth, d)
+                return f"{y:04d}-{mth:02d}-{d:02d}"
+            except (ValueError, TypeError, OSError):
+                pass
+    return None
+
+
+def _create_job_manual():
+    """Tạo một gói hàng từ JSON (không qua CSV). Tháng suy từ receivedAt."""
+    data = request.get_json(silent=True) or {}
+    job_id = str(data.get("jobId", "")).strip()
+    job_name = str(data.get("jobName", "")).strip()
+    if not job_id or not job_name:
+        return jsonify({"error": "jobId và jobName là bắt buộc"}), 400
+    if db.jobs.find_one({"jobId": job_id}):
+        return jsonify({"error": "Job ID đã tồn tại"}), 409
+    status = str(data.get("status", "Đang gán nhãn")).strip()
+    allowed_status = {"Đang gán nhãn", "Đang chờ duyệt", "Đã được duyệt"}
+    if status not in allowed_status:
+        status = "Đang gán nhãn"
+    received_at = str(data.get("receivedAt", "")).strip()
+    month = _month_from_received_str(received_at)
+    doc = {
+        "jobId": job_id,
+        "jobName": job_name,
+        "status": status,
+        "month": month,
+        "receivedAt": received_at,
+        "workers": [],
+        "records": [],
+        "hiddenUsers": [],
+    }
+    qa1 = str(data.get("qa1JobId", "")).strip()
+    qa2 = str(data.get("qa2JobId", "")).strip()
+    if qa1:
+        doc["qa1JobId"] = qa1
+    if qa2:
+        doc["qa2JobId"] = qa2
+    try:
+        db.jobs.insert_one(doc)
+    except PyMongoError as e:
+        return _serialize_error(str(e), 500)
+    return jsonify({"message": "Đã tạo gói hàng thành công", "jobId": job_id}), 201
+
+
+@app.route('/api/jobs', methods=['GET', 'POST'])
 def get_jobs():
+    """GET: danh sách (không nhúng records). POST: tạo gói thủ công JSON (tháng suy từ receivedAt)."""
+    if request.method == "POST":
+        return _create_job_manual()
     try:
         jobs_cursor = db.jobs.find({}, {'_id': 0})
         jobs = list(jobs_cursor)
-        
+
+        job_ids = [j.get("jobId") for j in jobs if j.get("jobId")]
+        count_by_job: dict = {}
+        if job_ids:
+            for doc in db.results.aggregate(
+                [
+                    {"$match": {"Job ID": {"$in": job_ids}}},
+                    {"$group": {"_id": "$Job ID", "n": {"$sum": 1}}},
+                ],
+                allowDiskUse=True,
+            ):
+                count_by_job[doc["_id"]] = doc["n"]
+
         for job in jobs:
             job_id = job.get("jobId")
-            records = list(db.results.find({"Job ID": job_id}, {'_id': 0}))
-            
-            mapped_records = []
-            for r in records:
-                # KPI could be "Invalid" or integer, handle appropriately or just pass along
-                mapped_records.append({
-                    "recordId": r.get("Record ID", ""),
-                    "worker": r.get("Current Worker", ""),
-                    "reworkCount": r.get("Rework Count", 0),
-                    "qa1": r.get("QA1", ""),
-                    "qa2": r.get("QA2", ""),
-                    "kpi": r.get("KPI", 0),
-                    "completedAt": r.get("Completed At", "")
-                })
-            job["records"] = mapped_records
             job["hiddenUsers"] = job.get("hiddenUsers", [])
+            if not job_id:
+                job["records"] = []
+                job["recordCount"] = 0
+                continue
+            job["recordCount"] = int(count_by_job.get(job_id, 0))
+            job["records"] = []
 
-        return jsonify(jobs)
+        return jsonify(_to_jsonable(jobs))
     except PyMongoError as e:
-        return _serialize_error(f"Lỗi đọc dữ liệu MongoDB: {str(e)}", 500)
+        h = _mongo_connection_hint(e)
+        return _serialize_error(f"Lỗi đọc dữ liệu MongoDB: {e}" + (f". {h}" if h else ""), 500)
+    except Exception as e:
+        app.logger.exception("get_jobs: lỗi không mong đợi")
+        return _serialize_error(f"Lỗi server: {str(e)}", 500)
 
 @app.route('/api/jobs/<job_id>', methods=['GET'])
 def get_job(job_id):
@@ -253,9 +547,33 @@ def get_job(job_id):
             })
         job["records"] = mapped_records
         job["hiddenUsers"] = job.get("hiddenUsers", [])
-        return jsonify(job)
+        return jsonify(_to_jsonable(job))
     except PyMongoError as e:
         return _serialize_error(f"Lỗi đọc dữ liệu MongoDB: {str(e)}", 500)
+    except Exception as e:
+        app.logger.exception("get_job: lỗi không mong đợi")
+        return _serialize_error(f"Lỗi server: {str(e)}", 500)
+
+
+@app.route("/api/jobs/<job_id>/telegram-notify", methods=["POST"])
+def api_telegram_notify_job(job_id):
+    """Gửi KPI qua Telegram tới từng worker đã /link bot (cùng gói job_id). Cần header bí mật."""
+    notify_linked_workers_for_job = get_telegram_kpi_core().notify_linked_workers_for_job
+
+    secret = (os.environ.get("TELEGRAM_NOTIFY_SECRET") or "").strip()
+    incoming = (request.headers.get("X-Telegram-Notify-Secret") or "").strip()
+    if not secret or incoming != secret:
+        return jsonify({"error": "Forbidden"}), 403
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
+        return jsonify({"error": "Chưa cấu hình TELEGRAM_BOT_TOKEN"}), 503
+    try:
+        res = notify_linked_workers_for_job(db, token, job_id)
+        return jsonify(_to_jsonable(res)), 200
+    except Exception as e:
+        app.logger.exception("api_telegram_notify_job")
+        return _serialize_error(str(e), 500)
+
 
 @app.route('/api/jobs/<job_id>', methods=['PATCH'])
 def update_job(job_id):
@@ -301,15 +619,32 @@ def update_job(job_id):
         return _serialize_error(str(e), 500)
 
 
+def _safe_job_id_filename_part(job_id: str) -> str:
+    """Tên file an toàn từ jobId (tránh path traversal)."""
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in (job_id or ""))
+
+
+def _pass_rate_csv_path_for_job(job_id: str):
+    """Ưu tiên CSV import theo jobId, sau đó file pass_rate_results.csv từ automation."""
+    base = Path(__file__).resolve().parent
+    per_job = base / f"pass_rate_{_safe_job_id_filename_part(job_id)}.csv"
+    if per_job.exists():
+        return per_job
+    legacy = base / "pass_rate_results.csv"
+    if legacy.exists():
+        return legacy
+    return None
+
+
 @app.route('/api/jobs/<job_id>/pass-rate', methods=['GET'])
 def get_job_pass_rate(job_id):
     """
-    Trả về dữ liệu pass-rate đã export từ automation (pass_rate_results.csv)
-    để frontend hiển thị trên trang chi tiết job.
+    Trả về dữ liệu tỉ lệ chính xác: file import theo job (pass_rate_<jobId>.csv) nếu có,
+    không thì pass_rate_results.csv từ đồng bộ automation.
     """
     try:
-        csv_path = Path(__file__).resolve().parent / "pass_rate_results.csv"
-        if not csv_path.exists():
+        csv_path = _pass_rate_csv_path_for_job(job_id)
+        if not csv_path:
             return jsonify({
                 "jobId": job_id,
                 "rows": [],
@@ -319,8 +654,8 @@ def get_job_pass_rate(job_id):
                     "totalLabelHours": 0,
                     "totalReworkHours": 0,
                 },
-                "source": str(csv_path.name),
-                "note": "Chưa có file pass_rate_results.csv"
+                "source": None,
+                "note": "Chưa có dữ liệu — import CSV hoặc đồng bộ Monitor.",
             }), 200
 
         rows = []
@@ -359,6 +694,62 @@ def get_job_pass_rate(job_id):
     except Exception as e:
         return _serialize_error(f"Lỗi khi đọc pass-rate: {str(e)}", 500)
 
+
+@app.route('/api/jobs/<job_id>/import-pass-rate', methods=['POST'])
+def import_pass_rate(job_id):
+    """Import CSV tỉ lệ chính xác (cùng format export Monitor: username, Thời gian label, Thời gian sửa bài, Tỉ lệ chính xác)."""
+    if "file" not in request.files:
+        return jsonify({"error": "Không tìm thấy file"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "Chưa chọn file"}), 400
+    if not file.filename.lower().endswith(".csv"):
+        return jsonify({"error": "Chỉ hỗ trợ CSV"}), 400
+    if not db.jobs.find_one({"jobId": job_id}, {"_id": 1}):
+        return jsonify({"error": "Không tìm thấy gói hàng"}), 404
+
+    fieldnames = ["username", "Thời gian label", "Thời gian sửa bài", "Tỉ lệ chính xác"]
+    try:
+        text = file.stream.read().decode("utf-8-sig")
+        stream = io.StringIO(text, newline=None)
+        reader = csv.DictReader(stream)
+        rows_out = []
+        for row in reader:
+            username = (row.get("username") or "").strip()
+            if not username:
+                continue
+
+            def _cell_float(key: str) -> float:
+                raw = row.get(key)
+                if raw is None:
+                    return 0.0
+                s = str(raw).replace("%", "").replace(",", ".").strip()
+                return _to_float(s, 0.0)
+
+            rows_out.append(
+                {
+                    "username": username,
+                    "Thời gian label": str(_cell_float("Thời gian label")),
+                    "Thời gian sửa bài": str(_cell_float("Thời gian sửa bài")),
+                    "Tỉ lệ chính xác": str(_cell_float("Tỉ lệ chính xác")),
+                }
+            )
+
+        if not rows_out:
+            return jsonify({"error": "File không có dòng hợp lệ (cần cột username)."}), 400
+
+        out_path = Path(__file__).resolve().parent / f"pass_rate_{_safe_job_id_filename_part(job_id)}.csv"
+        with out_path.open("w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(rows_out)
+
+        return jsonify({"message": f"Đã import tỉ lệ chính xác ({len(rows_out)} dòng)."}), 200
+    except UnicodeDecodeError:
+        return _serialize_error("Không đọc được file (UTF-8).", 400)
+    except Exception as e:
+        return _serialize_error(f"Lỗi khi import tỉ lệ chính xác: {str(e)}", 500)
+
 @app.route('/api/jobs/<job_id>/pass-rate/sync', methods=['POST'])
 def sync_pass_rate(job_id):
     """Chạy pass_rate automation và ghi lại pass_rate_results.csv."""
@@ -370,7 +761,7 @@ def sync_pass_rate(job_id):
             pass_rate_status["finished_at"] = None
         sync_logs["pass_rate"] = []
         try:
-            csv_path = Path(__file__).resolve().parent / "pass_rate_results.csv"
+            csv_path = Path(__file__).resolve().parent / f"pass_rate_{_safe_job_id_filename_part(job_id)}.csv"
             pass_rate.run_automation(job_id=job_id, headless=True, output_path=str(csv_path))
         except Exception as e:
             app.logger.exception("Pass-rate sync failed for %s: %s", job_id, e)
@@ -460,26 +851,8 @@ def import_jobs():
             else:
                 status = status_raw
             
-            # Tính toán month từ received_str
-            month_str = ""
-            try:
-                if "/" in received_str:
-                    parts = received_str.split("/")
-                    if len(parts) >= 2:
-                        month_str = f"{parts[1].zfill(2)}/{parts[2]}" if len(parts)==3 else f"{parts[0].zfill(2)}/{parts[1]}"
-                elif "-" in received_str:
-                    parts = received_str.split("-")
-                    if len(parts) >= 2:
-                        if len(parts[0]) == 4:
-                            month_str = f"{parts[1].zfill(2)}/{parts[0]}"
-                        else:
-                            month_str = f"{parts[1].zfill(2)}/{parts[2]}"
-            except Exception:
-                pass
-                
-            if not month_str:
-                month_str = datetime.now().strftime("%m/%Y")
-            
+            month_str = _month_from_received_str(received_str)
+
             jobs_to_insert.append({
                 "jobId": job_id,
                 "jobName": job_name,
@@ -491,14 +864,12 @@ def import_jobs():
             })
             row_count += 1
             
-        # Lưu vào MongoDB
-        for job in jobs_to_insert:
-            db.jobs.update_one(
-                {"jobId": job["jobId"]},
-                {"$set": job},
-                upsert=True
-            )
-            
+        if jobs_to_insert:
+            job_ops = [
+                UpdateOne({"jobId": j["jobId"]}, {"$set": j}, upsert=True) for j in jobs_to_insert
+            ]
+            _jobs_bulk_write_chunked(job_ops)
+
         return jsonify({"message": f"Đã import thành công {row_count} gói hàng."}), 200
         
     except Exception as e:
@@ -524,36 +895,39 @@ def import_records(job_id):
             
         expected_job_name = job.get("jobName", "")
 
-        stream = io.StringIO(file.stream.read().decode("utf-8-sig"), newline=None)
-        csv_input = csv.reader(stream)
-        
-        row_count = 0
-        records_to_insert = []
-        for row in csv_input:
-            if not row or len(row) < 11:
-                continue
-                
-            # Bỏ qua header
-            if "record id" in str(row[0]).lower():
-                continue
-                
+        text = file.stream.read().decode("utf-8-sig")
+
+        def iter_record_rows():
+            stream = io.StringIO(text, newline=None)
+            for row in csv.reader(stream):
+                if not row or len(row) < 11:
+                    continue
+                if "record id" in str(row[0]).lower():
+                    continue
+                yield row
+
+        for row in iter_record_rows():
             flow_name = row[2].strip()
-            
-            # Kiểm tra khớp job name
             if flow_name != expected_job_name:
-                return jsonify({"error": f"Tên dự án trong file ({flow_name}) không khớp với gói hàng hiện tại ({expected_job_name})."}), 400
-                
+                return jsonify(
+                    {
+                        "error": f"Tên dự án trong file ({flow_name}) không khớp với gói hàng hiện tại ({expected_job_name})."
+                    }
+                ), 400
+
+        row_count = 0
+        batch: list = []
+        batch_sz = _mongo_import_batch_size()
+        for row in iter_record_rows():
             record_id = row[0].strip()
             rework_count = 0
             try:
                 rework_count = int(row[6].strip())
-            except:
+            except Exception:
                 pass
-                
             worker = row[7].strip()
             completed_at = row[10].strip()
-            
-            records_to_insert.append({
+            rec = {
                 "Job ID": job_id,
                 "Record ID": record_id,
                 "Current Worker": worker,
@@ -561,18 +935,22 @@ def import_records(job_id):
                 "Completed At": completed_at,
                 "KPI": 0,
                 "QA1": "",
-                "QA2": ""
-            })
-            row_count += 1
-            
-        # Lưu vào collection results
-        for rec in records_to_insert:
-            db.results.update_one(
-                {"Job ID": job_id, "Record ID": rec["Record ID"]},
-                {"$set": rec},
-                upsert=True
+                "QA2": "",
+            }
+            batch.append(
+                UpdateOne(
+                    {"Job ID": job_id, "Record ID": rec["Record ID"]},
+                    {"$set": rec},
+                    upsert=True,
+                )
             )
-            
+            row_count += 1
+            if len(batch) >= batch_sz:
+                db.results.bulk_write(batch, ordered=False)
+                batch.clear()
+        if batch:
+            db.results.bulk_write(batch, ordered=False)
+
         return jsonify({"message": f"Đã import thành công {row_count} records."}), 200
         
     except Exception as e:
@@ -594,38 +972,44 @@ def import_kpi(job_id):
         stream = io.StringIO(file.stream.read().decode("utf-8-sig"), newline=None)
         csv_input = csv.reader(stream)
         
-        count = 0
+        affected = 0
         header = True
+        batch: list = []
+        batch_sz = _mongo_import_batch_size()
         for row in csv_input:
             if header:
                 header = False
                 continue
-            
+
             if not row or len(row) < 4:
                 continue
-                
+
             csv_job_id = row[0].strip()
             record_id = row[1].strip()
-            
+
             try:
                 kpi_val = float(row[3].strip())
             except ValueError:
                 kpi_val = 0
-                
+
             if csv_job_id == job_id:
                 worker = row[2].strip() if len(row) > 2 else ""
-                res = db.results.update_one(
-                    {"Job ID": job_id, "Record ID": record_id},
-                    {"$set": {
-                        "KPI": kpi_val,
-                        "Current Worker": worker
-                    }},
-                    upsert=True
+                batch.append(
+                    UpdateOne(
+                        {"Job ID": job_id, "Record ID": record_id},
+                        {"$set": {"KPI": kpi_val, "Current Worker": worker}},
+                        upsert=True,
+                    )
                 )
-                if res.modified_count > 0 or res.matched_count > 0 or res.upserted_id is not None:
-                    count += 1
-                    
-        return jsonify({"message": f"Đã import thành công KPI cho {count} records."}), 200
+                if len(batch) >= batch_sz:
+                    r = db.results.bulk_write(batch, ordered=False)
+                    affected += r.matched_count + r.upserted_count
+                    batch.clear()
+        if batch:
+            r = db.results.bulk_write(batch, ordered=False)
+            affected += r.matched_count + r.upserted_count
+
+        return jsonify({"message": f"Đã import thành công KPI cho {affected} records."}), 200
         
     except Exception as e:
         return _serialize_error(f"Lỗi khi import file KPI: {str(e)}", 500)
@@ -646,28 +1030,36 @@ def import_qa1(job_id):
         stream = io.StringIO(file.stream.read().decode("utf-8-sig"), newline=None)
         csv_input = csv.reader(stream)
         
-        count = 0
+        affected = 0
         header = True
+        batch: list = []
+        batch_sz = _mongo_import_batch_size()
         for row in csv_input:
             if header:
                 header = False
                 continue
-            
+
             if not row or len(row) < 3:
                 continue
-                
-            csv_job_id = row[0].strip()
+
             record_id = row[1].strip()
             qa_worker = row[2].strip()
-            
-            res = db.results.update_one(
-                {"Job ID": job_id, "Record ID": record_id},
-                {"$set": {"QA1": qa_worker}}
+
+            batch.append(
+                UpdateOne(
+                    {"Job ID": job_id, "Record ID": record_id},
+                    {"$set": {"QA1": qa_worker}},
+                )
             )
-            if res.modified_count > 0 or res.matched_count > 0:
-                count += 1
-                    
-        return jsonify({"message": f"Đã import thành công QA1 cho {count} records."}), 200
+            if len(batch) >= batch_sz:
+                r = db.results.bulk_write(batch, ordered=False)
+                affected += r.matched_count
+                batch.clear()
+        if batch:
+            r = db.results.bulk_write(batch, ordered=False)
+            affected += r.matched_count
+
+        return jsonify({"message": f"Đã import thành công QA1 cho {affected} records."}), 200
         
     except Exception as e:
         return _serialize_error(f"Lỗi khi import file QA1: {str(e)}", 500)
@@ -688,28 +1080,36 @@ def import_qa2(job_id):
         stream = io.StringIO(file.stream.read().decode("utf-8-sig"), newline=None)
         csv_input = csv.reader(stream)
         
-        count = 0
+        affected = 0
         header = True
+        batch: list = []
+        batch_sz = _mongo_import_batch_size()
         for row in csv_input:
             if header:
                 header = False
                 continue
-            
+
             if not row or len(row) < 3:
                 continue
-                
-            csv_job_id = row[0].strip()
+
             record_id = row[1].strip()
             qa_worker = row[2].strip()
-            
-            res = db.results.update_one(
-                {"Job ID": job_id, "Record ID": record_id},
-                {"$set": {"QA2": qa_worker}}
+
+            batch.append(
+                UpdateOne(
+                    {"Job ID": job_id, "Record ID": record_id},
+                    {"$set": {"QA2": qa_worker}},
+                )
             )
-            if res.modified_count > 0 or res.matched_count > 0:
-                count += 1
-                    
-        return jsonify({"message": f"Đã import thành công QA2 cho {count} records."}), 200
+            if len(batch) >= batch_sz:
+                r = db.results.bulk_write(batch, ordered=False)
+                affected += r.matched_count
+                batch.clear()
+        if batch:
+            r = db.results.bulk_write(batch, ordered=False)
+            affected += r.matched_count
+
+        return jsonify({"message": f"Đã import thành công QA2 cho {affected} records."}), 200
         
     except Exception as e:
         return _serialize_error(f"Lỗi khi import file QA2: {str(e)}", 500)
@@ -780,10 +1180,7 @@ def sync_job(job_id):
                     worker = row.get("Current Worker", "")
                     
                     if kpi is not None:
-                        try:
-                            kpi = float(kpi)
-                        except ValueError:
-                            kpi = 0
+                        kpi = _to_float(kpi)
                             
                     if csv_job_id == job_id and record_id:
                         res = db.results.update_one(
@@ -905,15 +1302,10 @@ def get_users():
         
         for rec in records:
             worker = rec.get("Current Worker", "").strip()
-            kpi = rec.get("KPI", 0)
+            kpi = _to_float(rec.get("KPI", 0))
             qa1 = rec.get("QA1", "").strip()
             qa2 = rec.get("QA2", "").strip()
             job_id = rec.get("Job ID", "")
-            
-            try:
-                kpi = float(kpi)
-            except (ValueError, TypeError):
-                kpi = 0
             
             if worker:
                 if worker not in label_map:
@@ -970,6 +1362,8 @@ def get_users():
             user_map[qa_user]["recordsQA"] = qa_meta[qa_user]["recordsQA"]
             user_map[qa_user]["jobsQA"] = qa_meta[qa_user]["jobsQA"]
         
+        tg_map, tg_lookup = _load_users_telegram_lookup(db)
+
         # Build response
         users = []
         for uname, data in user_map.items():
@@ -982,6 +1376,7 @@ def get_users():
             users.append({
                 "username": uname,
                 "role": role,
+                "id_telegram": tg_lookup(uname),
                 "kpiLabel": round(data["kpiLabel"], 2),
                 "kpiQA": round(data["kpiQA"], 2),
                 "totalKpi": round(data["kpiLabel"] + data["kpiQA"], 2),
@@ -992,11 +1387,37 @@ def get_users():
                 "jobCountQA": len(data["jobsQA"]),
                 "totalJobs": len(data["jobsLabel"] | data["jobsQA"]),
             })
+
+        # User chỉ có trong users (Telegram seed) nhưng chưa có trong results của job nào
+        in_list = {u["username"] for u in users}
+        for uname, tid in tg_map.items():
+            if uname in in_list:
+                continue
+            users.append({
+                "username": uname,
+                "role": "Telegram",
+                "id_telegram": tid,
+                "kpiLabel": 0.0,
+                "kpiQA": 0.0,
+                "totalKpi": 0.0,
+                "recordsLabel": 0,
+                "recordsQA": 0,
+                "totalRecords": 0,
+                "jobCountLabel": 0,
+                "jobCountQA": 0,
+                "totalJobs": 0,
+            })
         
         users.sort(key=lambda u: u["totalKpi"], reverse=True)
         
-        return jsonify(users)
-        
+        payload = _to_jsonable(users)
+        # json.dumps giữ key id_telegram kể cả giá trị null (jsonify mặc định có thể bỏ key None).
+        for row in payload:
+            if isinstance(row, dict) and "id_telegram" not in row:
+                row["id_telegram"] = None
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return Response(body, mimetype="application/json; charset=utf-8")
+
     except PyMongoError as e:
         return _serialize_error(f"Lỗi đọc dữ liệu MongoDB: {str(e)}", 500)
     except Exception as e:
@@ -1008,6 +1429,10 @@ def delete_user(username):
         del_res = db.results.delete_many({"Current Worker": username})
         qa1_res = db.results.update_many({"QA1": username}, {"$set": {"QA1": ""}})
         qa2_res = db.results.update_many({"QA2": username}, {"$set": {"QA2": ""}})
+        try:
+            db["users"].delete_one({"username": username})
+        except PyMongoError:
+            pass
         
         return jsonify({
             "message": f"Đã xóa user {username}",
@@ -1028,6 +1453,10 @@ def bulk_delete_users():
         del_res = db.results.delete_many({"Current Worker": {"$in": usernames}})
         qa1_res = db.results.update_many({"QA1": {"$in": usernames}}, {"$set": {"QA1": ""}})
         qa2_res = db.results.update_many({"QA2": {"$in": usernames}}, {"$set": {"QA2": ""}})
+        try:
+            db["users"].delete_many({"username": {"$in": usernames}})
+        except PyMongoError:
+            pass
         
         return jsonify({
             "message": f"Đã xóa {len(usernames)} users",
@@ -1076,44 +1505,40 @@ def kpi_full_restore():
         except (UnicodeDecodeError, ValueError) as e:
             return _serialize_error(f"Không đọc được JSON backup: {e}", 400)
 
-        if not isinstance(payload, dict):
-            return _serialize_error("File backup không hợp lệ (thiếu cấu trúc)", 400)
+        try:
+            stats = restore_kpi_payload(db, payload)
+        except ValueError as e:
+            return _serialize_error(str(e), 400)
 
-        cols = payload.get("collections")
-        if isinstance(cols, dict):
-            jobs_list = cols.get("jobs")
-            results_list = cols.get("results")
-        else:
-            jobs_list = payload.get("jobs")
-            results_list = payload.get("results")
+        verification = verify_restored_data_matches_payload(db, payload)
 
-        if not isinstance(jobs_list, list) or not isinstance(results_list, list):
-            return _serialize_error(
-                "File backup không hợp lệ — cần collections.jobs và collections.results là mảng",
-                400,
-            )
-
-        deleted_results = db.results.delete_many({}).deleted_count
-        deleted_jobs = db.jobs.delete_many({}).deleted_count
-        inserted_jobs = 0
-        inserted_results = 0
-
-        if jobs_list:
-            ins = db.jobs.insert_many(jobs_list)
-            inserted_jobs = len(ins.inserted_ids)
-        if results_list:
-            ins = db.results.insert_many(results_list)
-            inserted_results = len(ins.inserted_ids)
-
-        return jsonify({
-            "message": "Đã khôi phục KPI từ backup",
-            "previousDeleted": {"jobs": deleted_jobs, "results": deleted_results},
-            "inserted": {"jobs": inserted_jobs, "results": inserted_results},
-            "exportedAt": payload.get("exportedAt"),
-            "schemaVersion": payload.get("schemaVersion"),
-        }), 200
+        return jsonify(
+            {
+                "message": "Đã khôi phục KPI từ backup",
+                **stats,
+                "exportedAt": payload.get("exportedAt"),
+                "schemaVersion": payload.get("schemaVersion"),
+                "verification": verification,
+            }
+        ), 200
+    except DocumentTooLarge as e:
+        app.logger.exception("kpi_full_restore DocumentTooLarge")
+        return _serialize_error(
+            f"Document vượt quá giới hạn 16MB của MongoDB (hoặc lô insert quá lớn). Thử giảm RESTORE_INSERT_BATCH. Chi tiết: {e}",
+            400,
+        )
     except PyMongoError as e:
-        return _serialize_error(f"Lỗi MongoDB khi restore: {str(e)}", 500)
+        app.logger.exception("kpi_full_restore")
+        hint = _mongo_connection_hint(e)
+        detail = _restore_mongo_detail(e)
+        msg = f"Lỗi MongoDB khi restore: {e}{detail}"
+        if hint:
+            msg += f". {hint}"
+        return _serialize_error(msg, 500)
+    except Exception as e:
+        app.logger.exception("kpi_full_restore")
+        return _serialize_error(f"Lỗi khi restore: {str(e)}", 500)
+
 
 @app.route('/api/kpi/stats', methods=['GET'])
 def kpi_stats():
@@ -1182,15 +1607,8 @@ def kpi_stats():
             qa2 = rec.get("QA2", "").strip()
             job_id = rec.get("Job ID", "")
             
-            try:
-                kpi = float(rec.get("KPI", 0))
-            except (ValueError, TypeError):
-                kpi = 0
-                
-            try:
-                kpi_cust = float(rec.get("kpiCustomer", 0))
-            except (ValueError, TypeError):
-                kpi_cust = 0
+            kpi = _to_float(rec.get("KPI", 0))
+            kpi_cust = _to_float(rec.get("kpiCustomer", 0))
                 
             total_kpi_customer += kpi_cust
             
@@ -1286,6 +1704,242 @@ def kpi_stats():
         
     except PyMongoError as e:
         return _serialize_error(f"Lỗi đọc dữ liệu MongoDB: {str(e)}", 500)
+
+
+@app.route('/api/kpi/stats/daily', methods=['GET'])
+def kpi_stats_daily():
+    """KPI gom theo ngày hoàn thành record (trường Completed At), không dùng ngày nhận gói.
+    Query:
+        month: lọc gói theo tháng (mm/yyyy), giống /api/kpi/stats.
+        username: nếu có — chỉ KPI của user đó (Label + QA1 + QA2); nếu rỗng — tổng toàn hệ thống theo ngày.
+        from, to: YYYY-MM-DD giới hạn dải ngày trả về (tùy chọn).
+        Khi username rỗng: thêm userBreakdown — từng dòng là KPI theo ngày của từng nhân sự (Label/QA1/QA2 tách theo vai trò).
+    """
+    try:
+        month = request.args.get("month", None)
+        username = (request.args.get("username") or "").strip() or None
+        date_from = (request.args.get("from") or "").strip() or None
+        date_to = (request.args.get("to") or "").strip() or None
+
+        job_filter = {}
+        if month:
+            job_filter["month"] = month
+
+        jobs = list(
+            db.jobs.find(
+                job_filter,
+                {"jobId": 1, "month": 1, "hiddenUsers": 1, "_id": 0},
+            )
+        )
+        job_ids = [j["jobId"] for j in jobs]
+        job_hidden_map = {j["jobId"]: j.get("hiddenUsers", []) for j in jobs}
+        all_months = sorted(
+            list(set(j.get("month", "") for j in db.jobs.find({}, {"month": 1, "_id": 0})))
+        )
+
+        if not job_ids:
+            return jsonify(
+                {
+                    "month": month or "all",
+                    "username": username,
+                    "series": [],
+                    "userBreakdown": [],
+                    "unknownRecords": 0,
+                    "unknownKpiLabel": 0,
+                    "unknownKpiQA": 0,
+                    "availableMonths": all_months,
+                }
+            )
+
+        records = list(
+            db.results.find(
+                {"Job ID": {"$in": job_ids}},
+                {
+                    "_id": 0,
+                    "Job ID": 1,
+                    "Record ID": 1,
+                    "Current Worker": 1,
+                    "QA1": 1,
+                    "QA2": 1,
+                    "KPI": 1,
+                    "Completed At": 1,
+                },
+            )
+        )
+
+        def day_bucket(rec):
+            completed = rec.get("Completed At", "")
+            d = _completed_at_calendar_day(completed)
+            return d if d else "__unknown__"
+
+        buckets = {}
+        unknown_keys = set()
+
+        def ensure_bucket(day):
+            if day not in buckets:
+                buckets[day] = {
+                    "kpiLabel": 0.0,
+                    "kpiQA1": 0.0,
+                    "kpiQA2": 0.0,
+                    "recordsLabel": 0,
+                    "recordsQA1": 0,
+                    "recordsQA2": 0,
+                }
+
+        user_day = {}
+
+        def ensure_user_day(u_name, d):
+            if d == "__unknown__" or not u_name:
+                return None
+            k = (u_name, d)
+            if k not in user_day:
+                user_day[k] = {
+                    "kpiLabel": 0.0,
+                    "kpiQA1": 0.0,
+                    "kpiQA2": 0.0,
+                    "recordsLabel": 0,
+                    "recordsQA1": 0,
+                    "recordsQA2": 0,
+                }
+            return user_day[k]
+
+        for rec in records:
+            worker = (rec.get("Current Worker") or "").strip()
+            qa1 = (rec.get("QA1") or "").strip()
+            qa2 = (rec.get("QA2") or "").strip()
+            jid = rec.get("Job ID", "")
+            hidden = job_hidden_map.get(jid, [])
+            kpi = _to_float(rec.get("KPI", 0))
+            day = day_bucket(rec)
+
+            if username:
+                if worker != username and qa1 != username and qa2 != username:
+                    continue
+
+            if day == "__unknown__":
+                jid_u = rec.get("Job ID", "")
+                rid_u = str(rec.get("Record ID", "")).strip()
+                unknown_keys.add((jid_u, rid_u))
+
+            ensure_bucket(day)
+            b = buckets[day]
+
+            if username:
+                if worker == username and worker and worker not in hidden:
+                    b["kpiLabel"] += kpi
+                    b["recordsLabel"] += 1
+                    ub = ensure_user_day(worker, day)
+                    if ub is not None:
+                        ub["kpiLabel"] += kpi
+                        ub["recordsLabel"] += 1
+                if qa1 == username and qa1 and qa1 not in hidden:
+                    b["kpiQA1"] += kpi
+                    b["recordsQA1"] += 1
+                    ub = ensure_user_day(qa1, day)
+                    if ub is not None:
+                        ub["kpiQA1"] += kpi
+                        ub["recordsQA1"] += 1
+                if qa2 == username and qa2 and qa2 not in hidden:
+                    b["kpiQA2"] += kpi
+                    b["recordsQA2"] += 1
+                    ub = ensure_user_day(qa2, day)
+                    if ub is not None:
+                        ub["kpiQA2"] += kpi
+                        ub["recordsQA2"] += 1
+            else:
+                if worker and worker not in hidden:
+                    b["kpiLabel"] += kpi
+                    b["recordsLabel"] += 1
+                    ub = ensure_user_day(worker, day)
+                    if ub is not None:
+                        ub["kpiLabel"] += kpi
+                        ub["recordsLabel"] += 1
+                if qa1 and qa1 not in hidden:
+                    b["kpiQA1"] += kpi
+                    b["recordsQA1"] += 1
+                    ub = ensure_user_day(qa1, day)
+                    if ub is not None:
+                        ub["kpiQA1"] += kpi
+                        ub["recordsQA1"] += 1
+                if qa2 and qa2 not in hidden:
+                    b["kpiQA2"] += kpi
+                    b["recordsQA2"] += 1
+                    ub = ensure_user_day(qa2, day)
+                    if ub is not None:
+                        ub["kpiQA2"] += kpi
+                        ub["recordsQA2"] += 1
+
+        unknown = buckets.pop("__unknown__", None)
+        unknown_records = len(unknown_keys)
+        unknown_kpi_label = 0.0
+        unknown_kpi_qa = 0.0
+        if unknown:
+            unknown_kpi_label = unknown["kpiLabel"]
+            unknown_kpi_qa = unknown["kpiQA1"] + unknown["kpiQA2"]
+
+        ordered_days = sorted(buckets.keys())
+        series = []
+        for day in ordered_days:
+            if date_from and day < date_from:
+                continue
+            if date_to and day > date_to:
+                continue
+            b = buckets[day]
+            series.append(
+                {
+                    "date": day,
+                    "kpiLabel": round(b["kpiLabel"], 2),
+                    "kpiQA1": round(b["kpiQA1"], 2),
+                    "kpiQA2": round(b["kpiQA2"], 2),
+                    "kpiQA": round(b["kpiQA1"] + b["kpiQA2"], 2),
+                    "recordsLabel": b["recordsLabel"],
+                    "recordsQA1": b["recordsQA1"],
+                    "recordsQA2": b["recordsQA2"],
+                    "recordsQA": b["recordsQA1"] + b["recordsQA2"],
+                }
+            )
+
+        user_breakdown = []
+        for (uname, d), b in user_day.items():
+            if date_from and d < date_from:
+                continue
+            if date_to and d > date_to:
+                continue
+            user_breakdown.append(
+                {
+                    "date": d,
+                    "username": uname,
+                    "kpiLabel": round(b["kpiLabel"], 2),
+                    "kpiQA1": round(b["kpiQA1"], 2),
+                    "kpiQA2": round(b["kpiQA2"], 2),
+                    "kpiQA": round(b["kpiQA1"] + b["kpiQA2"], 2),
+                    "recordsLabel": b["recordsLabel"],
+                    "recordsQA1": b["recordsQA1"],
+                    "recordsQA2": b["recordsQA2"],
+                    "recordsQA": b["recordsQA1"] + b["recordsQA2"],
+                }
+            )
+        user_breakdown.sort(key=lambda r: r["username"])
+        user_breakdown.sort(key=lambda r: r["date"], reverse=True)
+
+        return jsonify(
+            {
+                "month": month or "all",
+                "username": username,
+                "series": series,
+                "userBreakdown": user_breakdown,
+                "unknownRecords": int(unknown_records),
+                "unknownKpiLabel": round(unknown_kpi_label, 2),
+                "unknownKpiQA": round(unknown_kpi_qa, 2),
+                "availableMonths": all_months,
+            }
+        )
+    except PyMongoError as e:
+        return _serialize_error(f"Lỗi đọc dữ liệu MongoDB: {str(e)}", 500)
+    except Exception as e:
+        return _serialize_error(f"Lỗi server: {str(e)}", 500)
+
+
 @app.route('/api/kpi/reconciliation', methods=['GET'])
 def kpi_reconciliation():
     """Đối soát KPI: so sánh KPI hệ thống vs KPI khách hàng, group theo gói hàng."""
@@ -1312,15 +1966,8 @@ def kpi_reconciliation():
             qa1 = rec.get("QA1", "").strip()
             qa2 = rec.get("QA2", "").strip()
             
-            try:
-                kpi = float(rec.get("KPI", 0))
-            except (ValueError, TypeError):
-                kpi = 0
-                
-            try:
-                kpi_customer = float(rec.get("kpiCustomer", 0))
-            except (ValueError, TypeError):
-                kpi_customer = 0
+            kpi = _to_float(rec.get("KPI", 0))
+            kpi_customer = _to_float(rec.get("kpiCustomer", 0))
 
             if job_id and record_id:
                 key = (job_id, record_id)
@@ -1570,21 +2217,25 @@ def import_customer_kpi():
             err_msg = "Không thể import do dữ liệu không khớp hoàn toàn với hệ thống:\n\n" + "\n".join(integrity_errors)
             return jsonify({"error": err_msg}), 400
 
-        # Nếu mọi thứ hợp lệ (hoàn toàn khớp), tiến hành bulk_write
-        from pymongo import UpdateOne
+        # Nếu mọi thứ hợp lệ (hoàn toàn khớp), tiến hành bulk_write theo lô
         operations = []
+        now_iso = datetime.now().isoformat()
         for r in parsed_rows:
-            operations.append(UpdateOne(
-                {"Job ID": r["job_id"], "Record ID": r["record_id"]},
-                {"$set": {
-                    "kpiCustomer": r["kpi_customer"],
-                    "Customer Username": r["username"],
-                    "importedAt": datetime.now().isoformat()
-                }}
-            ))
+            operations.append(
+                UpdateOne(
+                    {"Job ID": r["job_id"], "Record ID": r["record_id"]},
+                    {
+                        "$set": {
+                            "kpiCustomer": r["kpi_customer"],
+                            "Customer Username": r["username"],
+                            "importedAt": now_iso,
+                        }
+                    },
+                )
+            )
 
         if operations:
-            db.results.bulk_write(operations)
+            _results_bulk_write_chunked(operations)
 
         return jsonify({"message": f"Đã import thành công KPI khách hàng cho {len(operations)} bản ghi."}), 200
 

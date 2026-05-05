@@ -17,16 +17,18 @@ import {
   BarChart3,
   Search,
   ArchiveRestore,
+  Plus,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import { type JobPackage, type JobStatus } from "@/lib/types";
+import { apiBase } from "@/lib/apiBase";
 
 export const Route = createFileRoute("/admin/kpi/")({
   head: () => ({ meta: [{ title: "KPI Packages Dashboard" }] }),
   loader: async () => {
     try {
-      const isServer = typeof window === 'undefined';
-      const API_BASE = isServer ? 'http://backend:5000' : 'http://localhost:5000';
+      const API_BASE = apiBase();
       const res = await fetch(`${API_BASE}/api/jobs`);
       if (!res.ok) throw new Error("Failed to fetch");
       const jobs: JobPackage[] = await res.json();
@@ -51,6 +53,14 @@ function AdminKpiList() {
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
   const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
+  const [isAddPackageModalOpen, setIsAddPackageModalOpen] = useState(false);
+  const [isManualSaving, setIsManualSaving] = useState(false);
+  const [manualJobId, setManualJobId] = useState("");
+  const [manualJobName, setManualJobName] = useState("");
+  const [manualStatus, setManualStatus] = useState<string>("Đang gán nhãn");
+  const [manualReceivedAt, setManualReceivedAt] = useState("");
+  const [manualQa1, setManualQa1] = useState("");
+  const [manualQa2, setManualQa2] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const restoreFileInputRef = useRef<HTMLInputElement>(null);
   const backupMenuRef = useRef<HTMLDivElement>(null);
@@ -66,6 +76,25 @@ function AdminKpiList() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [isBackupModalOpen]);
 
+  useEffect(() => {
+    if (!isAddPackageModalOpen) return;
+    setManualJobId("");
+    setManualJobName("");
+    setManualStatus("Đang gán nhãn");
+    setManualReceivedAt("");
+    setManualQa1("");
+    setManualQa2("");
+  }, [isAddPackageModalOpen]);
+
+  useEffect(() => {
+    if (!isAddPackageModalOpen) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape" && !isUploading && !isManualSaving) setIsAddPackageModalOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isAddPackageModalOpen, isUploading, isManualSaving]);
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -75,7 +104,7 @@ function AdminKpiList() {
     formData.append("file", file);
 
     try {
-      const API_BASE = typeof window === 'undefined' ? 'http://backend:5000' : 'http://localhost:5000';
+      const API_BASE = apiBase();
       const res = await fetch(`${API_BASE}/api/jobs/import`, {
         method: "POST",
         body: formData,
@@ -85,8 +114,10 @@ function AdminKpiList() {
         const err = await res.json();
         throw new Error(err.error || "Upload failed");
       }
-      
+
       await router.invalidate();
+      setIsAddPackageModalOpen(false);
+      toast.success(t("import_package_success"));
     } catch (err: any) {
       console.error(err);
       alert(`Có lỗi xảy ra: ${err.message}`);
@@ -96,9 +127,45 @@ function AdminKpiList() {
     }
   };
 
+  const handleManualCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const jid = manualJobId.trim();
+    const jname = manualJobName.trim();
+    if (!jid || !jname) return;
+    setIsManualSaving(true);
+    const API_BASE = apiBase();
+    const body: Record<string, string> = {
+      jobId: jid,
+      jobName: jname,
+      status: manualStatus,
+    };
+    if (manualReceivedAt.trim()) body.receivedAt = manualReceivedAt.trim();
+    if (manualQa1.trim()) body.qa1JobId = manualQa1.trim();
+    if (manualQa2.trim()) body.qa2JobId = manualQa2.trim();
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error((data as { error?: string }).error || res.statusText);
+      }
+      await router.invalidate();
+      setIsAddPackageModalOpen(false);
+      toast.success(t("manual_success"));
+    } catch (err: unknown) {
+      console.error(err);
+      alert(err instanceof Error ? err.message : "Error");
+    } finally {
+      setIsManualSaving(false);
+    }
+  };
+
   const handleFullBackup = async () => {
     setIsBackingUp(true);
-    const API_BASE = typeof window === "undefined" ? "http://backend:5000" : "http://localhost:5000";
+    const API_BASE = apiBase();
     try {
       const res = await fetch(`${API_BASE}/api/kpi/backup`);
       if (!res.ok) {
@@ -133,8 +200,7 @@ function AdminKpiList() {
     }
 
     setIsRestoring(true);
-    const API_BASE =
-      typeof window === "undefined" ? "http://backend:5000" : "http://localhost:5000";
+    const API_BASE = apiBase();
     const formData = new FormData();
     formData.append("file", file);
 
@@ -149,7 +215,31 @@ function AdminKpiList() {
       }
       await router.invalidate();
       const msg = (body as { message?: string }).message || "OK";
-      alert(msg);
+      const v = (body as { verification?: { ok: boolean; message?: string; issues?: string[]; checks?: Record<string, number> } }).verification;
+
+      const checkLines: string[] = [];
+      if (v?.checks) {
+        checkLines.push(`Jobs: file ${v.checks.jobCountFile} / DB ${v.checks.jobCountDb}`);
+        checkLines.push(`Results: file ${v.checks.resultCountFile} / DB ${v.checks.resultCountDb}`);
+      }
+
+      if (v?.ok) {
+        toast.success(t("restore_success_db"), {
+          description: [t("restore_success_verified"), v.message, ...checkLines].filter(Boolean).join("\n"),
+          duration: 10000,
+        });
+      } else if (v && !v.ok) {
+        const issueBlock = (v.issues?.slice(0, 12) ?? []).join("\n");
+        toast.warning(t("restore_verify_mismatch"), {
+          description: [v.message, ...checkLines, issueBlock].filter(Boolean).join("\n"),
+          duration: 20000,
+        });
+      } else {
+        toast.success(t("restore_success_db"), {
+          description: msg,
+          duration: 8000,
+        });
+      }
     } catch (err: unknown) {
       console.error(err);
       alert(`${t("restore_failed")} ${err instanceof Error ? err.message : ""}`);
@@ -299,26 +389,148 @@ function AdminKpiList() {
               ) : null}
             </div>
 
-            {/* Import Button */}
-            <div>
-              <input
-                type="file"
-                accept=".csv"
-                className="hidden"
-                ref={fileInputRef}
-                onChange={handleFileUpload}
-              />
-              <button 
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isUploading || isRestoring}
-                className={`group inline-flex items-center gap-2 rounded-full bg-zinc-950 px-5 py-2.5 text-sm font-semibold text-white transition-all hover:bg-zinc-800 hover:shadow-md shadow-sm dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200 ${isUploading || isRestoring ? 'opacity-70 cursor-not-allowed' : ''}`}
-              >
-                <Download className={`h-4 w-4 ${isUploading ? 'animate-bounce' : ''}`} />
-                {isUploading ? t("importing") : t("import_package")}
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => setIsAddPackageModalOpen(true)}
+              disabled={isUploading || isRestoring}
+              className={`group inline-flex items-center gap-2 rounded-full bg-zinc-950 px-5 py-2.5 text-sm font-semibold text-white transition-all hover:bg-zinc-800 hover:shadow-md shadow-sm dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200 ${isUploading || isRestoring ? "opacity-70 cursor-not-allowed" : ""}`}
+            >
+              <Plus className="h-4 w-4" />
+              {t("add_package")}
+            </button>
           </div>
         </div>
+
+        {isAddPackageModalOpen ? (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-package-title"
+          >
+            <button
+              type="button"
+              aria-label={t("add_package_close")}
+              className="absolute inset-0 bg-black/50 backdrop-blur-[2px]"
+              disabled={isUploading || isManualSaving}
+              onClick={() => !isUploading && !isManualSaving && setIsAddPackageModalOpen(false)}
+            />
+            <div className="relative z-10 max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-border bg-card p-6 shadow-2xl">
+              <h2 id="add-package-title" className="text-lg font-semibold tracking-tight">
+                {t("add_package_title")}
+              </h2>
+              <p className="mt-2 text-sm text-muted-foreground">{t("add_package_desc")}</p>
+
+              <div className="mt-6 border-t border-border pt-5">
+                <h3 className="text-sm font-semibold text-foreground">{t("add_package_csv_section")}</h3>
+                <input
+                  type="file"
+                  accept=".csv"
+                  className="hidden"
+                  ref={fileInputRef}
+                  onChange={handleFileUpload}
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isUploading || isRestoring || isManualSaving}
+                  className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-zinc-950 px-4 py-2.5 text-sm font-semibold text-white transition-all hover:bg-zinc-800 disabled:opacity-70 sm:w-auto dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+                >
+                  <Download className={`h-4 w-4 ${isUploading ? "animate-bounce" : ""}`} />
+                  {isUploading ? t("importing") : t("import_package")}
+                </button>
+              </div>
+
+              <div className="mt-6 border-t border-border pt-5">
+                <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <PenTool className="h-4 w-4 text-muted-foreground" />
+                  {t("add_package_manual_section")}
+                </h3>
+                <form onSubmit={handleManualCreate} className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <div className="sm:col-span-1">
+                    <label className="text-xs font-medium text-muted-foreground">{t("manual_job_id")}</label>
+                    <input
+                      value={manualJobId}
+                      onChange={(e) => setManualJobId(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none ring-accent/30 focus:ring-2"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div className="sm:col-span-1">
+                    <label className="text-xs font-medium text-muted-foreground">{t("manual_job_name")}</label>
+                    <input
+                      value={manualJobName}
+                      onChange={(e) => setManualJobName(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none ring-accent/30 focus:ring-2"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="text-xs font-medium text-muted-foreground">{t("manual_received_at")}</label>
+                    <input
+                      value={manualReceivedAt}
+                      onChange={(e) => setManualReceivedAt(e.target.value)}
+                      placeholder={t("manual_received_placeholder")}
+                      className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none ring-accent/30 placeholder:text-muted-foreground/60 focus:ring-2"
+                      autoComplete="off"
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground">{t("manual_received_hint")}</p>
+                  </div>
+                  <div className="sm:col-span-2 sm:max-w-xs">
+                    <label className="text-xs font-medium text-muted-foreground">{t("manual_status")}</label>
+                    <select
+                      value={manualStatus}
+                      onChange={(e) => setManualStatus(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none ring-accent/30 focus:ring-2"
+                    >
+                      <option value="Đang gán nhãn">{t("status_labeling")}</option>
+                      <option value="Đang chờ duyệt">{t("status_pending")}</option>
+                      <option value="Đã được duyệt">{t("status_approved")}</option>
+                    </select>
+                  </div>
+                  <div className="sm:col-span-1">
+                    <label className="text-xs font-medium text-muted-foreground">{t("manual_qa1_job")}</label>
+                    <input
+                      value={manualQa1}
+                      onChange={(e) => setManualQa1(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none ring-accent/30 focus:ring-2"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div className="sm:col-span-1">
+                    <label className="text-xs font-medium text-muted-foreground">{t("manual_qa2_job")}</label>
+                    <input
+                      value={manualQa2}
+                      onChange={(e) => setManualQa2(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none ring-accent/30 focus:ring-2"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div className="sm:col-span-2 flex justify-end pt-1">
+                    <button
+                      type="submit"
+                      disabled={isManualSaving || isUploading || isRestoring || !manualJobId.trim() || !manualJobName.trim()}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-accent/30 bg-accent/15 px-4 py-2.5 text-sm font-semibold text-accent-foreground transition-colors hover:bg-accent/25 disabled:opacity-50 dark:text-foreground"
+                    >
+                      {isManualSaving ? t("manual_saving") : t("manual_create")}
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              <div className="mt-6 flex justify-end border-t border-border pt-4">
+                <button
+                  type="button"
+                  onClick={() => setIsAddPackageModalOpen(false)}
+                  disabled={isUploading || isManualSaving}
+                  className="rounded-xl border border-border px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-60"
+                >
+                  {t("add_package_close")}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <input
           type="file"
@@ -371,7 +583,7 @@ function AdminKpiList() {
                 <div className="mt-6 flex flex-wrap items-center gap-4 border-t border-border/50 pt-4">
                   <div className="flex items-center gap-2">
                     <FileText className="h-4 w-4 text-muted-foreground" />
-                    <span className="font-semibold">{job.records?.length || 0}</span>
+                    <span className="font-semibold">{job.recordCount ?? job.records?.length ?? 0}</span>
                     <span className="text-sm text-muted-foreground">{t("records")}</span>
                   </div>
                   <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">

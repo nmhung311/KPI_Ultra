@@ -1,5 +1,6 @@
 import { Outlet, Link, createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
 import { Header } from "@/components/lms/Header";
+import { Toaster } from "@/components/ui/sonner";
 import "@/i18n";
 
 import appCss from "../styles.css?url";
@@ -71,6 +72,7 @@ function RootComponent() {
     <div className="min-h-screen bg-background text-foreground">
       <Header />
       <Outlet />
+      <Toaster richColors closeButton position="top-center" />
     </div>
   );
 }

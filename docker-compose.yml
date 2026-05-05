@@ -19,15 +19,26 @@ services:
       - MONGO_URI=mongodb://mongodb:27017/kpi_db
       - SELENIUM_URL=http://selenium:4444/wd/hub
     depends_on:
-      - mongodb
-      - selenium
+      mongodb:
+        condition: service_healthy
+      selenium:
+        condition: service_started
 
   mongodb:
-    image: mongo:latest
+    # Volume đã ở featureCompatibilityVersion 8.2 — cần image >= 8.2 (không dùng 7.x).
+    image: mongo:8.2
+    restart: unless-stopped
     ports:
       - "27017:27017"
     volumes:
       - mongodb_data:/data/db
+    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.5"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "mongodb://127.0.0.1:27017/admin", "--eval", "db.adminCommand({ ping: 1 }).ok && quit(0)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
 
   selenium:
     image: selenium/standalone-chrome:latest

@@ -7,3 +7,4 @@ openpyxl
 webdriver-manager
 click
 requests
+python-telegram-bot>=21.0,<23

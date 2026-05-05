@@ -19,6 +19,7 @@ import {
   Check,
   Trash2,
 } from "lucide-react";
+import { apiBase } from "@/lib/apiBase";
 
 interface ReconciliationRow {
   recordId: string;
@@ -37,15 +38,11 @@ interface ReconciliationJob {
   rows: ReconciliationRow[];
 }
 
-const API_BASE = typeof window === "undefined" ? "http://backend:5000" : "http://localhost:5000";
-
 export const Route = createFileRoute("/admin/kpi/reconciliation")({
   head: () => ({ meta: [{ title: "Đối soát KPI" }] }),
   loader: async () => {
     try {
-      const isServer = typeof window === "undefined";
-      const base = isServer ? "http://backend:5000" : "http://localhost:5000";
-      const res = await fetch(`${base}/api/kpi/reconciliation`);
+      const res = await fetch(`${apiBase()}/api/kpi/reconciliation`);
       if (!res.ok) throw new Error("Failed");
       return { data: (await res.json()) as ReconciliationJob[] };
     } catch {
@@ -90,7 +87,7 @@ function ReconciliationPage() {
   const refresh = async () => {
     setIsRefreshing(true);
     try {
-      const res = await fetch(`${API_BASE}/api/kpi/reconciliation`);
+      const res = await fetch(`${apiBase()}/api/kpi/reconciliation`);
       if (res.ok) setData(await res.json());
     } catch {}
     setIsRefreshing(false);
@@ -103,7 +100,7 @@ function ReconciliationPage() {
     const fd = new FormData();
     fd.append("file", file);
     try {
-      const res = await fetch(`${API_BASE}/api/kpi/reconciliation/import`, { method: "POST", body: fd });
+      const res = await fetch(`${apiBase()}/api/kpi/reconciliation/import`, { method: "POST", body: fd });
       const json = await res.json();
       if (!res.ok) {
         setImportError(json.error || "Upload failed");
@@ -126,7 +123,7 @@ function ReconciliationPage() {
     
     setIsResetting(true);
     try {
-      const res = await fetch(`${API_BASE}/api/kpi/reconciliation/reset`, { method: "POST" });
+      const res = await fetch(`${apiBase()}/api/kpi/reconciliation/reset`, { method: "POST" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Reset failed");
       showToast(json.message);

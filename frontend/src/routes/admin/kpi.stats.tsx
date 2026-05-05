@@ -1,6 +1,17 @@
 import { useState, useMemo, useEffect } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { motion, AnimatePresence } from "framer-motion";
+import { format, subDays } from "date-fns";
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+} from "recharts";
 import {
   ArrowLeft,
   BarChart3,
@@ -15,8 +26,8 @@ import {
   Layers,
   Package,
   X,
-  GitCompareArrows,
 } from "lucide-react";
+import { apiBase } from "@/lib/apiBase";
 
 interface UserStat {
   username: string;
@@ -33,6 +44,42 @@ interface UserStat {
   jobCountLabel: number;
   jobCountQA1: number;
   jobCountQA2: number;
+}
+
+interface DailySeriesRow {
+  date: string;
+  kpiLabel: number;
+  kpiQA1: number;
+  kpiQA2: number;
+  kpiQA: number;
+  recordsLabel: number;
+  recordsQA1: number;
+  recordsQA2: number;
+  recordsQA: number;
+}
+
+interface UserDailyBreakdownRow {
+  date: string;
+  username: string;
+  kpiLabel: number;
+  kpiQA1: number;
+  kpiQA2: number;
+  kpiQA: number;
+  recordsLabel: number;
+  recordsQA1: number;
+  recordsQA2: number;
+  recordsQA: number;
+}
+
+interface DailyStatsData {
+  month: string;
+  username: string | null;
+  series: DailySeriesRow[];
+  userBreakdown?: UserDailyBreakdownRow[];
+  unknownRecords: number;
+  unknownKpiLabel: number;
+  unknownKpiQA: number;
+  availableMonths: string[];
 }
 
 interface StatsData {
@@ -60,8 +107,7 @@ export const Route = createFileRoute("/admin/kpi/stats")({
   head: () => ({ meta: [{ title: "Thống kê KPI nhân sự" }] }),
   loader: async () => {
     try {
-      const isServer = typeof window === "undefined";
-      const API_BASE = isServer ? "http://backend:5000" : "http://localhost:5000";
+      const API_BASE = apiBase();
       const res = await fetch(`${API_BASE}/api/kpi/stats`);
       if (!res.ok) throw new Error("Failed to fetch stats");
       const stats: StatsData = await res.json();
@@ -94,6 +140,55 @@ function KpiStatsPage() {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [qaModalType, setQaModalType] = useState<"qa1" | "qa1_customer" | "qa2" | null>(null);
 
+  const [dailyStats, setDailyStats] = useState<DailyStatsData | null>(null);
+  const [dailyUser, setDailyUser] = useState("");
+  const [dateFrom, setDateFrom] = useState(() => format(subDays(new Date(), 45), "yyyy-MM-dd"));
+  const [dateTo, setDateTo] = useState(() => format(new Date(), "yyyy-MM-dd"));
+  const [dailyLoading, setDailyLoading] = useState(false);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    const run = async () => {
+      setDailyLoading(true);
+      try {
+        const API_BASE = apiBase();
+        const params = new URLSearchParams();
+        if (selectedMonth !== "all") params.set("month", selectedMonth);
+        if (dailyUser.trim()) params.set("username", dailyUser.trim());
+        if (dateFrom) params.set("from", dateFrom);
+        if (dateTo) params.set("to", dateTo);
+        const q = params.toString();
+        const url = `${API_BASE}/api/kpi/stats/daily${q ? `?${q}` : ""}`;
+        const res = await fetch(url, { signal: ac.signal });
+        if (!res.ok) throw new Error("daily stats failed");
+        const data: DailyStatsData = await res.json();
+        if (!ac.signal.aborted) setDailyStats(data);
+      } catch (e) {
+        if ((e as Error).name === "AbortError") return;
+        console.error(e);
+        if (!ac.signal.aborted) setDailyStats(null);
+      } finally {
+        if (!ac.signal.aborted) setDailyLoading(false);
+      }
+    };
+    run();
+    return () => ac.abort();
+  }, [selectedMonth, dailyUser, dateFrom, dateTo]);
+
+  const sortedUsernames = useMemo(() => {
+    return [...stats.users].map((u) => u.username).sort((a, b) => a.localeCompare(b, "vi"));
+  }, [stats.users]);
+
+  const chartData = useMemo(() => {
+    if (!dailyStats?.series?.length) return [];
+    return dailyStats.series.map((row) => ({
+      ...row,
+      labelShort: format(new Date(row.date + "T12:00:00"), "dd/MM"),
+    }));
+  }, [dailyStats]);
+
+  const userBreakdownRows = dailyStats?.userBreakdown ?? [];
+
   // Filter users who have QA records, sorted by kpi descending
   const qaUsers1 = useMemo(() => {
     return stats.users
@@ -116,7 +211,7 @@ function KpiStatsPage() {
   const fetchStats = async (month: string) => {
     setIsLoading(true);
     try {
-      const API_BASE = typeof window === "undefined" ? "http://backend:5000" : "http://localhost:5000";
+      const API_BASE = apiBase();
       const url = month === "all" ? `${API_BASE}/api/kpi/stats` : `${API_BASE}/api/kpi/stats?month=${encodeURIComponent(month)}`;
       const res = await fetch(url);
       if (res.ok) {
@@ -253,24 +348,8 @@ function KpiStatsPage() {
           Thống kê KPI
         </h1>
         <p className="mt-3 max-w-2xl text-lg text-muted-foreground">
-          Tổng hợp KPI Label và KPI QA của toàn bộ nhân sự theo tháng, gộp từ tất cả các gói hàng.
+          Tổng hợp KPI Label và KPI QA theo tháng; biểu đồ theo ngày chỉ dựa trên trường thời gian hoàn thành của từng record (Completed At).
         </p>
-        
-        {stats.totals.totalKpiCustomer !== undefined && (
-          <div className={`mt-4 inline-flex items-center gap-2 rounded-xl border p-3 ${stats.totals.totalKpiLabel === stats.totals.totalKpiCustomer ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' : 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400'}`}>
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-background shadow-sm">
-              <GitCompareArrows className="h-4 w-4" />
-            </div>
-            <div className="flex flex-col">
-              <span className="text-sm font-semibold">Đối soát hệ thống & Khách hàng</span>
-              <span className="text-xs opacity-90">
-                {stats.totals.totalKpiLabel === stats.totals.totalKpiCustomer 
-                  ? "Khớp hoàn toàn (Không có chênh lệch)" 
-                  : `Lệch ${Math.abs(stats.totals.totalKpiLabel - stats.totals.totalKpiCustomer).toLocaleString()} KPI`}
-              </span>
-            </div>
-          </div>
-        )}
       </motion.div>
 
       {/* Month Selector + Actions */}
@@ -318,6 +397,192 @@ function KpiStatsPage() {
         >
           <Download className="h-4 w-4" /> Xuất CSV
         </button>
+      </motion.div>
+
+      {/* KPI theo ngày */}
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.45, delay: 0.12 }}
+        className="mt-10 overflow-hidden rounded-[2rem] border border-border/60 bg-card p-6 shadow-lg md:p-8"
+      >
+        <div className="flex flex-col gap-2 border-b border-border/50 pb-5 md:flex-row md:items-end md:justify-between">
+          <div>
+            <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-violet-600 dark:text-violet-400">
+              <Calendar className="h-4 w-4" />
+              Theo ngày
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-5 flex flex-col flex-wrap gap-3 md:flex-row md:items-center">
+          <div className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm">
+            <span className="text-muted-foreground">User</span>
+            <select
+              value={dailyUser}
+              onChange={(e) => setDailyUser(e.target.value)}
+              className="max-w-[220px] cursor-pointer bg-transparent font-medium text-foreground outline-none md:max-w-xs"
+            >
+              <option value="">Tất cả (hệ thống)</option>
+              {sortedUsernames.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm">
+              <span className="text-muted-foreground">Từ</span>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="bg-transparent font-medium text-foreground outline-none"
+              />
+            </label>
+            <label className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm">
+              <span className="text-muted-foreground">Đến</span>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="bg-transparent font-medium text-foreground outline-none"
+              />
+            </label>
+          </div>
+        </div>
+
+        {dailyStats && dailyStats.unknownRecords > 0 && (
+          <p className="mt-4 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-2 text-sm text-amber-900 dark:text-amber-200">
+            Có {dailyStats.unknownRecords} bản ghi không có Completed At hợp lệ — KPI Label{" "}
+            {dailyStats.unknownKpiLabel.toLocaleString()}, KPI QA {dailyStats.unknownKpiQA.toLocaleString()} (không hiển thị trên biểu đồ).
+          </p>
+        )}
+
+        <div className="relative mt-6 h-[320px] w-full md:h-[380px]">
+          {dailyLoading && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-card/70 backdrop-blur-[1px]">
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" />
+                Đang tải theo ngày...
+              </div>
+            </div>
+          )}
+          {chartData.length === 0 && !dailyLoading ? (
+            <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-border bg-muted/20 text-sm text-muted-foreground">
+              Không có điểm dữ liệu trong khoảng ngày đã chọn (hoặc chưa có record trong các gói lọc được).
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" className="stroke-border/60" />
+                <XAxis dataKey="labelShort" tick={{ fontSize: 11 }} className="text-muted-foreground" />
+                <YAxis tick={{ fontSize: 11 }} className="text-muted-foreground" />
+                <Tooltip
+                  contentStyle={{ borderRadius: 12, border: "1px solid hsl(var(--border))" }}
+                  labelFormatter={(label) => {
+                    const entry = chartData.find((d) => d.labelShort === label);
+                    return entry?.date ?? String(label);
+                  }}
+                />
+                <Legend />
+                <Bar dataKey="kpiLabel" name="KPI Label" stackId="a" fill="rgb(16 185 129)" radius={[0, 0, 0, 0]} />
+                <Bar dataKey="kpiQA" name="KPI QA" stackId="a" fill="rgb(245 158 11)" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        {chartData.length > 0 && (
+          <div className="mt-6 overflow-x-auto rounded-xl border border-border/60">
+            <table className="w-full min-w-[640px] text-left text-sm">
+              <thead className="border-b border-border bg-muted/40 text-[12px] font-medium text-muted-foreground">
+                <tr>
+                  <th className="px-4 py-3">Ngày</th>
+                  <th className="px-4 py-3 text-right">KPI Label</th>
+                  <th className="px-4 py-3 text-right">KPI QA</th>
+                  <th className="px-4 py-3 text-right">Tổng</th>
+                  <th className="px-4 py-3 text-right">Rec. Label</th>
+                  <th className="px-4 py-3 text-right">Rec. QA</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/60">
+                {[...chartData]
+                  .sort((a, b) => b.date.localeCompare(a.date))
+                  .map((row) => (
+                    <tr key={row.date} className="hover:bg-muted/25">
+                      <td className="px-4 py-2.5 font-mono text-xs text-foreground">{row.date}</td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
+                        {row.kpiLabel.toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-amber-600 dark:text-amber-400">
+                        {row.kpiQA.toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-foreground">
+                        {(row.kpiLabel + row.kpiQA).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{row.recordsLabel}</td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{row.recordsQA}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {userBreakdownRows.length > 0 && (
+          <div className="mt-8">
+            <h3 className="text-sm font-semibold tracking-tight text-foreground">
+              Chi tiết KPI theo ngày — từng nhân sự
+            </h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Mỗi dòng là tổng KPI trong ngày của một user theo vai trò Current Worker (Label), QA1, QA2; cùng logic lọc gói và ẩn user như biểu đồ phía trên.
+            </p>
+            <div className="mt-3 max-h-[min(480px,55vh)] overflow-auto rounded-xl border border-border/60">
+              <table className="w-full min-w-[880px] text-left text-sm">
+                <thead className="sticky top-0 z-[1] border-b border-border bg-muted/90 text-[12px] font-medium text-muted-foreground backdrop-blur-sm">
+                  <tr>
+                    <th className="px-4 py-3">Ngày</th>
+                    <th className="px-4 py-3">Username</th>
+                    <th className="px-4 py-3 text-right">KPI Label</th>
+                    <th className="px-4 py-3 text-right">KPI QA1</th>
+                    <th className="px-4 py-3 text-right">KPI QA2</th>
+                    <th className="px-4 py-3 text-right">KPI QA</th>
+                    <th className="px-4 py-3 text-right">Tổng KPI</th>
+                    <th className="px-4 py-3 text-right">Rec. L</th>
+                    <th className="px-4 py-3 text-right">Rec. QA</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/60">
+                  {userBreakdownRows.map((row) => (
+                    <tr key={`${row.date}-${row.username}`} className="hover:bg-muted/25">
+                      <td className="px-4 py-2.5 font-mono text-xs text-foreground">{row.date}</td>
+                      <td className="px-4 py-2.5 font-medium text-foreground">{row.username}</td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
+                        {row.kpiLabel.toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-amber-600/90 dark:text-amber-400/90">
+                        {row.kpiQA1.toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-amber-700 dark:text-amber-500">
+                        {row.kpiQA2.toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-amber-600 dark:text-amber-400">
+                        {row.kpiQA.toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-foreground">
+                        {(row.kpiLabel + row.kpiQA).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{row.recordsLabel}</td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{row.recordsQA}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </motion.div>
 
       {/* Summary Cards */}

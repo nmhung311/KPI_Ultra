@@ -18,5 +18,7 @@ export interface JobPackage {
   qa1JobId?: string;
   qa2JobId?: string;
   hiddenUsers?: string[];
+  /** Số bản ghi (GET /api/jobs); ưu tiên hơn records.length khi API chỉ trả count */
+  recordCount?: number;
   records: RecordDetail[];
 }

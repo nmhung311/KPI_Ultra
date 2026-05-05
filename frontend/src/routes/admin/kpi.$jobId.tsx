@@ -14,17 +14,18 @@ import {
   TrendingUp,
   Eye,
   EyeOff,
-  BarChart3
+  BarChart3,
+  Tag,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { type JobPackage } from "@/lib/types";
+import { apiBase } from "@/lib/apiBase";
 
 export const Route = createFileRoute("/admin/kpi/$jobId")({
   head: () => ({ meta: [{ title: "Package Details" }] }),
   loader: async ({ params }) => {
     try {
-      const isServer = typeof window === 'undefined';
-      const API_BASE = isServer ? 'http://backend:5000' : 'http://localhost:5000';
+      const API_BASE = apiBase();
       const res = await fetch(`${API_BASE}/api/jobs/${params.jobId}`);
       if (!res.ok) throw notFound();
       const job: JobPackage = await res.json();
@@ -41,11 +42,11 @@ function PackageDetail() {
   const { job } = Route.useLoaderData();
   const { t } = useTranslation();
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<"overview" | "records" | "qa">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "label_list" | "records" | "qa">("overview");
   const [selectedQA, setSelectedQA] = useState<any>(null);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const importTypeRef = useRef<"record" | "kpi" | "qa1" | "qa2">("record");
+  const importTypeRef = useRef<"record" | "kpi" | "qa1" | "qa2" | "pass_rate">("record");
   
   // Edit mode states
   const [isEditingHeader, setIsEditingHeader] = useState(false);
@@ -87,7 +88,7 @@ function PackageDetail() {
 
   const checkAppenServerOnline = async () => {
     try {
-      const API_BASE = typeof window === "undefined" ? "http://backend:5000" : "http://localhost:5000";
+      const API_BASE = apiBase();
       const res = await fetch(`${API_BASE}/api/server/appen-health`);
       if (!res.ok) {
         setIsServerOnline(false);
@@ -109,7 +110,7 @@ function PackageDetail() {
   const toggleHiddenUser = async (username: string) => {
     try {
       setIsTogglingHide(true);
-      const API_BASE = typeof window === 'undefined' ? 'http://backend:5000' : 'http://localhost:5000';
+      const API_BASE = apiBase();
       const res = await fetch(`${API_BASE}/api/jobs/${job.jobId}/hide-user`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -129,7 +130,7 @@ function PackageDetail() {
   useEffect(() => {
     const checkActiveSync = async () => {
       try {
-        const API_BASE = typeof window === 'undefined' ? 'http://backend:5000' : 'http://localhost:5000';
+        const API_BASE = apiBase();
         const res = await fetch(`${API_BASE}/progress`);
         if (res.ok) {
           const data = await res.json();
@@ -151,7 +152,7 @@ function PackageDetail() {
     if (isSyncing) {
       interval = setInterval(async () => {
         try {
-          const API_BASE = typeof window === 'undefined' ? 'http://backend:5000' : 'http://localhost:5000';
+          const API_BASE = apiBase();
           const pRes = await fetch(`${API_BASE}/progress`);
           if (pRes.ok) {
             const data = await pRes.json();
@@ -246,7 +247,7 @@ function PackageDetail() {
   const loadPassRateData = useCallback(async () => {
     setIsPassRateLoading(true);
     try {
-      const API_BASE = typeof window === "undefined" ? "http://backend:5000" : "http://localhost:5000";
+      const API_BASE = apiBase();
       const res = await fetch(`${API_BASE}/api/jobs/${job.jobId}/pass-rate`);
       if (!res.ok) throw new Error("Không lấy được dữ liệu pass-rate");
       const data = await res.json();
@@ -287,7 +288,7 @@ function PackageDetail() {
 
   const fetchPassRateStatus = useCallback(async () => {
     try {
-      const API_BASE = typeof window === "undefined" ? "http://backend:5000" : "http://localhost:5000";
+      const API_BASE = apiBase();
       const res = await fetch(`${API_BASE}/api/jobs/${job.jobId}/pass-rate/status`);
       if (!res.ok) return false;
       const data = await res.json();
@@ -350,7 +351,7 @@ function PackageDetail() {
       setSyncProgress(1);
     }
     try {
-      const API_BASE = typeof window === 'undefined' ? 'http://backend:5000' : 'http://localhost:5000';
+      const API_BASE = apiBase();
       if (shouldRunMainSync) {
         const url = `${API_BASE}/api/jobs/${job.jobId}/sync${force ? '?force=true' : ''}`;
         const res = await fetch(url, {
@@ -398,7 +399,7 @@ function PackageDetail() {
     
     setIsSavingHeader(true);
     try {
-      const API_BASE = typeof window === 'undefined' ? 'http://backend:5000' : 'http://localhost:5000';
+      const API_BASE = apiBase();
       const res = await fetch(`${API_BASE}/api/jobs/${job.jobId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -430,7 +431,7 @@ function PackageDetail() {
     }
   };
 
-  const handleImportTypeClick = (type: "record" | "kpi" | "qa1" | "qa2") => {
+  const handleImportTypeClick = (type: "record" | "kpi" | "qa1" | "qa2" | "pass_rate") => {
     importTypeRef.current = type;
     fileInputRef.current?.click();
   };
@@ -444,13 +445,14 @@ function PackageDetail() {
     formData.append("file", file);
 
     try {
-      const API_BASE = typeof window === 'undefined' ? 'http://backend:5000' : 'http://localhost:5000';
+      const API_BASE = apiBase();
       const type = importTypeRef.current;
       
       let endpoint = `${API_BASE}/api/jobs/${job.jobId}/import-records`;
-      if (type === 'kpi') endpoint = `${API_BASE}/api/jobs/${job.jobId}/import-kpi`;
-      if (type === 'qa1') endpoint = `${API_BASE}/api/jobs/${job.jobId}/import-qa1`;
-      if (type === 'qa2') endpoint = `${API_BASE}/api/jobs/${job.jobId}/import-qa2`;
+      if (type === "kpi") endpoint = `${API_BASE}/api/jobs/${job.jobId}/import-kpi`;
+      if (type === "qa1") endpoint = `${API_BASE}/api/jobs/${job.jobId}/import-qa1`;
+      if (type === "qa2") endpoint = `${API_BASE}/api/jobs/${job.jobId}/import-qa2`;
+      if (type === "pass_rate") endpoint = `${API_BASE}/api/jobs/${job.jobId}/import-pass-rate`;
 
       const res = await fetch(endpoint, {
         method: "POST",
@@ -466,6 +468,9 @@ function PackageDetail() {
       alert(data.message);
       
       await router.invalidate();
+      if (type === "pass_rate") {
+        await loadPassRateData();
+      }
     } catch (err: any) {
       console.error(err);
       alert(`Có lỗi xảy ra: ${err.message}`);
@@ -563,6 +568,13 @@ function PackageDetail() {
 
     return Array.from(userMap.values()).sort((a, b) => (b.kpiLabel + b.kpiQA1 + b.kpiQA2) - (a.kpiLabel + a.kpiQA1 + a.kpiQA2));
   }, [job, qaList]);
+
+  /** Người có job type Label hoặc Label / QA (có làm record trên gói). */
+  const labelJobUsersList = useMemo(() => {
+    return overviewList
+      .filter((u) => u.role === "Label" || u.role === "Label / QA")
+      .sort((a, b) => b.kpiLabel - a.kpiLabel);
+  }, [overviewList]);
 
   // Tính tổng KPI Label và KPI QA cho gói hàng này
   const jobTotals = useMemo(() => {
@@ -803,22 +815,32 @@ function PackageDetail() {
 
       {/* Tabs and Actions */}
       <div className="mt-12 flex items-center justify-between">
-        <div className="flex rounded-full bg-muted/50 p-1 shadow-inner">
-          <button 
-            onClick={() => setActiveTab('overview')}
-            className={`flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium transition-all ${activeTab === 'overview' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+        <div className="flex flex-wrap gap-1 rounded-full bg-muted/50 p-1 shadow-inner">
+          <button
+            type="button"
+            onClick={() => setActiveTab("overview")}
+            className={`flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition-all sm:px-5 ${activeTab === "overview" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
           >
             <BarChart3 className="h-4 w-4" /> Tổng quan
           </button>
-          <button 
-            onClick={() => setActiveTab('records')}
-            className={`flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium transition-all ${activeTab === 'records' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+          <button
+            type="button"
+            onClick={() => setActiveTab("records")}
+            className={`flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition-all sm:px-5 ${activeTab === "records" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
           >
             <FileText className="h-4 w-4" /> {t("record_list")}
           </button>
-          <button 
-            onClick={() => setActiveTab('qa')}
-            className={`flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium transition-all ${activeTab === 'qa' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+          <button
+            type="button"
+            onClick={() => setActiveTab("label_list")}
+            className={`flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition-all sm:px-5 ${activeTab === "label_list" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+          >
+            <Tag className="h-4 w-4" /> {t("label_list_title")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("qa")}
+            className={`flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition-all sm:px-5 ${activeTab === "qa" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}
           >
             <Users className="h-4 w-4" /> {t("qa_list")}
           </button>
@@ -976,10 +998,16 @@ function PackageDetail() {
                       Import QA1
                     </button>
                     <button
-                      onClick={() => handleImportTypeClick('qa2')}
-                      className="px-4 py-2.5 text-left text-[13px] text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors font-medium"
+                      onClick={() => handleImportTypeClick("qa2")}
+                      className="px-4 py-2.5 text-left text-[13px] text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors font-medium border-b border-border/40"
                     >
                       Import QA2
+                    </button>
+                    <button
+                      onClick={() => handleImportTypeClick("pass_rate")}
+                      className="px-4 py-2.5 text-left text-[13px] text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors font-medium"
+                    >
+                      Import tỉ lệ chính xác
                     </button>
                   </div>
                 </div>
@@ -1185,8 +1213,89 @@ function PackageDetail() {
             </div>
           </div>
         </motion.div>
+      ) : activeTab === "label_list" ? (
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.08 }}
+          className="mt-6 overflow-hidden rounded-[2rem] border border-border/60 bg-card shadow-lg"
+        >
+          <div className="overflow-x-auto p-6 md:p-8">
+            <div className="mb-4 flex flex-col gap-1">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-amber-700 dark:text-amber-400">
+                <Tag className="h-4 w-4" />
+                {t("label_list_title")}
+              </div>
+            </div>
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-border bg-muted/40 text-[13px] font-medium text-muted-foreground">
+                <tr>
+                  <th className="px-5 py-4 w-14 text-center">{t("label_col_stt")}</th>
+                  <th className="px-5 py-4">{t("label_col_username")}</th>
+                  <th className="px-5 py-4 text-center">{t("label_col_job_type")}</th>
+                  <th className="px-5 py-4 text-center">{t("label_col_records")}</th>
+                  <th className="px-5 py-4 text-right">{t("label_col_kpi_label")}</th>
+                  <th className="px-5 py-4 text-center">{t("label_col_visibility")}</th>
+                  <th className="px-5 py-4 text-right">{t("actions")}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/60">
+                {labelJobUsersList.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="py-12 text-center text-muted-foreground">
+                      {t("label_empty")}
+                    </td>
+                  </tr>
+                ) : (
+                  labelJobUsersList.map((u, idx) => (
+                    <tr
+                      key={u.username}
+                      className={`transition-colors ${u.isHidden ? "bg-muted/10 opacity-75" : "hover:bg-muted/30"}`}
+                    >
+                      <td className="px-5 py-4 text-center font-mono text-sm text-muted-foreground">{idx + 1}</td>
+                      <td className={`px-5 py-4 font-semibold ${u.isHidden ? "text-muted-foreground" : "text-foreground/90"}`}>
+                        {u.username}
+                      </td>
+                      <td className="px-5 py-4 text-center text-sm text-foreground/80">{u.role}</td>
+                      <td className="px-5 py-4 text-center tabular-nums font-medium text-foreground/80">{u.recordsLB}</td>
+                      <td className="px-5 py-4 text-right tabular-nums font-semibold text-emerald-600 dark:text-emerald-400">
+                        {Math.round(u.kpiLabel)}
+                      </td>
+                      <td className="px-5 py-4 text-center">
+                        {u.isHidden ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold text-red-600 dark:text-red-400">
+                            <EyeOff className="h-3 w-3" /> Đã ẩn
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                            <Eye className="h-3 w-3" /> Hiển thị
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-5 py-4 text-right">
+                        <button
+                          type="button"
+                          disabled={isTogglingHide}
+                          onClick={() => toggleHiddenUser(u.username)}
+                          className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                            u.isHidden
+                              ? "bg-blue-500/10 text-blue-600 hover:bg-blue-500/20 dark:text-blue-400"
+                              : "bg-red-500/10 text-red-600 hover:bg-red-500/20 dark:text-red-400"
+                          }`}
+                        >
+                          {u.isHidden ? "Hiện KPI" : "Ẩn KPI"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </motion.div>
       ) : null}
 
+      {activeTab === "records" || activeTab === "qa" ? (
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -1194,113 +1303,88 @@ function PackageDetail() {
         className="mt-6 overflow-hidden rounded-[2rem] border border-border/60 bg-card shadow-lg"
       >
         <div className="overflow-x-auto p-6 md:p-8">
-          <table className="w-full text-left text-sm">
-            {activeTab === 'overview' ? (
-              <tbody>
+          {activeTab === "records" ? (
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-border bg-muted/40 text-[13px] font-medium text-muted-foreground">
                 <tr>
-                  <td className="py-12 text-center text-muted-foreground">
-                    Tổng quan đã được rút gọn. Vui lòng xem 2 thẻ phía trên: Pass-rate và slider Top 3.
-                  </td>
+                  <th className="px-5 py-4">Record ID</th>
+                  <th className="px-5 py-4">{t("worker")}</th>
+                  <th className="px-5 py-4 text-center">{t("rework")}</th>
+                  <th className="px-5 py-4">Ngày hoàn thành</th>
+                  <th className="px-5 py-4">QA1</th>
+                  <th className="px-5 py-4">QA2</th>
+                  <th className="px-5 py-4 text-right">{t("kpi")}</th>
                 </tr>
-              </tbody>
-            ) : activeTab === 'records' ? (
-              <>
-                <thead className="border-b border-border bg-muted/40 text-[13px] font-medium text-muted-foreground">
-                  <tr>
-                    <th className="px-5 py-4">Record ID</th>
-                    <th className="px-5 py-4">{t("worker")}</th>
-                    <th className="px-5 py-4 text-center">{t("rework")}</th>
-                    <th className="px-5 py-4">Ngày hoàn thành</th>
-                    <th className="px-5 py-4">QA1</th>
-                    <th className="px-5 py-4">QA2</th>
-                    <th className="px-5 py-4 text-right">{t("kpi")}</th>
+              </thead>
+              <tbody className="divide-y divide-border/60">
+                {filteredRecords.map((rec) => (
+                  <tr key={rec.recordId} className="group transition-colors hover:bg-muted/30">
+                    <td className="px-5 py-4">
+                      <span className="font-mono font-medium text-foreground/90">{rec.recordId}</span>
+                    </td>
+                    <td className="px-5 py-4 font-medium">{rec.worker}</td>
+                    <td className="px-5 py-4 text-center font-medium">{rec.reworkCount}</td>
+                    <td className="px-5 py-4 text-foreground/80 text-xs">
+                      {rec.completedAt ? new Date(rec.completedAt).toLocaleString("vi-VN") : "—"}
+                    </td>
+                    <td className="px-5 py-4 text-foreground/80">{rec.qa1 || "—"}</td>
+                    <td className="px-5 py-4 text-foreground/80">{rec.qa2 || "—"}</td>
+                    <td className="px-5 py-4 text-right">
+                      <span className="font-semibold tabular-nums text-foreground/90">{rec.kpi}</span>
+                    </td>
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-border/60">
-                  {filteredRecords.map((rec) => (
-                    <tr key={rec.recordId} className="group transition-colors hover:bg-muted/30">
-                      <td className="px-5 py-4">
-                        <span className="font-mono font-medium text-foreground/90">{rec.recordId}</span>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-border bg-muted/40 text-[13px] font-medium text-muted-foreground">
+                <tr>
+                  <th className="px-5 py-4">{t("qa_username")}</th>
+                  <th className="px-5 py-4 text-center">Records QA1</th>
+                  <th className="px-5 py-4 text-center">KPI QA1</th>
+                  <th className="px-5 py-4 text-center">Records QA2</th>
+                  <th className="px-5 py-4 text-center">KPI QA2</th>
+                  <th className="px-5 py-4 text-right">{t("actions")}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/60">
+                {qaList.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="py-12 text-center text-muted-foreground">
+                      {t("empty_qa")}
+                    </td>
+                  </tr>
+                ) : (
+                  qaList.map((qa) => (
+                    <tr
+                      key={qa.username}
+                      className="group cursor-pointer transition-colors hover:bg-muted/30"
+                      onClick={() => setSelectedQA(qa)}
+                    >
+                      <td className="px-5 py-4 font-semibold text-accent">{qa.username}</td>
+                      <td className="px-5 py-4 text-center font-medium text-foreground/80">{qa.recordsCountQA1}</td>
+                      <td className="px-5 py-4 text-center font-semibold tabular-nums text-amber-600 dark:text-amber-400">
+                        {qa.kpiQA1}
                       </td>
-                      <td className="px-5 py-4 font-medium">
-                        {rec.worker}
-                      </td>
-                      <td className="px-5 py-4 text-center font-medium">
-                        {rec.reworkCount}
-                      </td>
-                      <td className="px-5 py-4 text-foreground/80 text-xs">
-                        {rec.completedAt ? new Date(rec.completedAt).toLocaleString('vi-VN') : "—"}
-                      </td>
-                      <td className="px-5 py-4 text-foreground/80">
-                        {rec.qa1 || "—"}
-                      </td>
-                      <td className="px-5 py-4 text-foreground/80">
-                        {rec.qa2 || "—"}
+                      <td className="px-5 py-4 text-center font-medium text-foreground/80">{qa.recordsCountQA2}</td>
+                      <td className="px-5 py-4 text-center font-semibold tabular-nums text-amber-600 dark:text-amber-400">
+                        {qa.kpiQA2}
                       </td>
                       <td className="px-5 py-4 text-right">
-                        <span className="font-semibold tabular-nums text-foreground/90">
-                          {rec.kpi}
-                        </span>
+                        <button className="inline-flex h-8 items-center justify-center rounded-full bg-accent/10 px-4 text-xs font-semibold text-accent transition-colors hover:bg-accent hover:text-primary-foreground group-hover:bg-accent group-hover:text-primary-foreground">
+                          {t("view_details")} <ChevronRight className="ml-1 h-3 w-3" />
+                        </button>
                       </td>
                     </tr>
-                  ))}
-                </tbody>
-              </>
-            ) : (
-              <>
-                <thead className="border-b border-border bg-muted/40 text-[13px] font-medium text-muted-foreground">
-                  <tr>
-                    <th className="px-5 py-4">{t("qa_username")}</th>
-                    <th className="px-5 py-4 text-center">Records QA1</th>
-                    <th className="px-5 py-4 text-center">KPI QA1</th>
-                    <th className="px-5 py-4 text-center">Records QA2</th>
-                    <th className="px-5 py-4 text-center">KPI QA2</th>
-                    <th className="px-5 py-4 text-right">{t("actions")}</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border/60">
-                  {qaList.length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="py-12 text-center text-muted-foreground">
-                        {t("empty_qa")}
-                      </td>
-                    </tr>
-                  ) : (
-                    qaList.map((qa) => (
-                      <tr 
-                        key={qa.username} 
-                        className="group cursor-pointer transition-colors hover:bg-muted/30"
-                        onClick={() => setSelectedQA(qa)}
-                      >
-                        <td className="px-5 py-4 font-semibold text-accent">
-                          {qa.username}
-                        </td>
-                        <td className="px-5 py-4 text-center font-medium text-foreground/80">
-                          {qa.recordsCountQA1}
-                        </td>
-                        <td className="px-5 py-4 text-center font-semibold tabular-nums text-amber-600 dark:text-amber-400">
-                          {qa.kpiQA1}
-                        </td>
-                        <td className="px-5 py-4 text-center font-medium text-foreground/80">
-                          {qa.recordsCountQA2}
-                        </td>
-                        <td className="px-5 py-4 text-center font-semibold tabular-nums text-amber-600 dark:text-amber-400">
-                          {qa.kpiQA2}
-                        </td>
-                        <td className="px-5 py-4 text-right">
-                          <button className="inline-flex h-8 items-center justify-center rounded-full bg-accent/10 px-4 text-xs font-semibold text-accent transition-colors hover:bg-accent hover:text-primary-foreground group-hover:bg-accent group-hover:text-primary-foreground">
-                            {t("view_details")} <ChevronRight className="ml-1 h-3 w-3" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </>
-            )}
-          </table>
+                  ))
+                )}
+              </tbody>
+            </table>
+          )}
         </div>
       </motion.div>
+      ) : null}
 
       {/* QA Detail Popup */}
       <AnimatePresence>

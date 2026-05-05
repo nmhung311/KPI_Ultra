@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { motion } from "framer-motion";
 import {
@@ -12,21 +12,41 @@ import {
   Tag,
   ShieldCheck,
 } from "lucide-react";
+import { apiBase } from "@/lib/apiBase";
 
 interface UserData {
   username: string;
   role: string;
+  id_telegram?: number | null;
+}
+
+/** Chuẩn hóa từng dòng API (hỗ trợ BSON/JSON, key snake_case). */
+function normalizeApiUser(raw: Record<string, unknown>): UserData {
+  const username = String(raw.username ?? "").trim();
+  const role = String(raw.role ?? "").trim();
+  const rawId = raw.id_telegram ?? raw.idTelegram;
+  let id_telegram: number | null = null;
+  if (rawId != null && rawId !== "") {
+    const n = typeof rawId === "number" ? rawId : Number(String(rawId).replace(/\s/g, ""));
+    if (Number.isFinite(n)) id_telegram = n;
+  }
+  return { username, role, id_telegram };
+}
+
+async function fetchUsersList(): Promise<UserData[]> {
+  const API_BASE = apiBase();
+  const res = await fetch(`${API_BASE}/api/users`);
+  if (!res.ok) throw new Error("Failed to fetch users");
+  const raw: unknown = await res.json();
+  if (!Array.isArray(raw)) return [];
+  return raw.map((row) => normalizeApiUser(row as Record<string, unknown>));
 }
 
 export const Route = createFileRoute("/admin/users")({
   head: () => ({ meta: [{ title: "Nhân sự — KPI Ultra" }] }),
   loader: async () => {
     try {
-      const isServer = typeof window === "undefined";
-      const API_BASE = isServer ? "http://backend:5000" : "http://localhost:5000";
-      const res = await fetch(`${API_BASE}/api/users`);
-      if (!res.ok) throw new Error("Failed to fetch users");
-      const users: UserData[] = await res.json();
+      const users = await fetchUsersList();
       return { users };
     } catch (e) {
       console.error(e);
@@ -37,14 +57,31 @@ export const Route = createFileRoute("/admin/users")({
 });
 
 function AdminUsers() {
-  const { users } = Route.useLoaderData();
+  const loaderData = Route.useLoaderData();
+  const [users, setUsers] = useState<UserData[]>(loaderData.users);
+
+  useEffect(() => {
+    setUsers(loaderData.users);
+  }, [loaderData.users]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchUsersList()
+      .then((list) => {
+        if (!cancelled) setUsers(list);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [searchQuery, setSearchQuery] = useState("");
-  const [sortKey, setSortKey] = useState<"username" | "role">("username");
+  const [sortKey, setSortKey] = useState<"username" | "role" | "id_telegram">("username");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [selectedUsers, setSelectedUsers] = useState<Set<string>>(new Set());
 
-  const toggleSort = (key: "username" | "role") => {
+  const toggleSort = (key: "username" | "role" | "id_telegram") => {
     if (sortKey === key) {
       setSortDir(sortDir === "asc" ? "desc" : "asc");
     } else {
@@ -69,6 +106,13 @@ function AdminUsers() {
 
     // Sort
     const sorted = [...list].sort((a: UserData, b: UserData) => {
+      if (sortKey === "id_telegram") {
+        const na =
+          a.id_telegram != null && a.id_telegram !== undefined ? Number(a.id_telegram) : -1;
+        const nb =
+          b.id_telegram != null && b.id_telegram !== undefined ? Number(b.id_telegram) : -1;
+        return sortDir === "asc" ? na - nb : nb - na;
+      }
       let valA: string;
       let valB: string;
 
@@ -162,7 +206,7 @@ function AdminUsers() {
   };
 
   return (
-    <main className="mx-auto max-w-5xl px-6 py-12 md:py-16">
+    <main className="mx-auto max-w-6xl px-6 py-12 md:py-16">
       {/* Header */}
       <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>
         <div className="inline-flex items-center gap-2 rounded-full border border-accent/20 bg-accent/10 px-3 py-1 text-[12px] font-medium tracking-widest text-accent uppercase backdrop-blur-md">
@@ -198,7 +242,7 @@ function AdminUsers() {
 
           {/* Role filter */}
           <div className="flex items-center rounded-full border border-border bg-card p-0.5 shadow-sm">
-            {["all", "Label", "QA", "Label / QA"].map((r) => (
+            {["all", "Label", "QA", "Label / QA", "Telegram"].map((r) => (
               <button
                 key={r}
                 onClick={() => setRoleFilter(r)}
@@ -256,6 +300,14 @@ function AdminUsers() {
                     Username <SortIcon col="username" />
                   </div>
                 </th>
+                <th
+                  className="min-w-[11rem] px-5 py-4 cursor-pointer select-none text-left font-mono text-xs text-foreground"
+                  onClick={() => toggleSort("id_telegram")}
+                >
+                  <div className="flex items-center gap-1.5 whitespace-nowrap">
+                    Telegram ID <SortIcon col="id_telegram" />
+                  </div>
+                </th>
                 <th className="px-5 py-4 cursor-pointer select-none" onClick={() => toggleSort("role")}>
                   <div className="flex items-center gap-1.5">
                     Vai trò <SortIcon col="role" />
@@ -267,7 +319,7 @@ function AdminUsers() {
             <tbody className="divide-y divide-border/60">
               {filteredAndSorted.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="py-16 text-center text-muted-foreground">
+                  <td colSpan={6} className="py-16 text-center text-muted-foreground">
                     <div className="flex flex-col items-center gap-3">
                       <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted text-muted-foreground">
                         <Users className="h-7 w-7 opacity-50" />
@@ -299,6 +351,9 @@ function AdminUsers() {
                       <td className="px-5 py-4">
                         <span className="font-semibold text-foreground">{u.username}</span>
                       </td>
+                      <td className="min-w-[11rem] whitespace-nowrap px-5 py-4 font-mono text-sm tabular-nums text-foreground">
+                        {u.id_telegram != null && u.id_telegram !== undefined ? String(u.id_telegram) : "—"}
+                      </td>
                       <td className="px-5 py-4">
                         <RoleBadge role={u.role} />
                       </td>
@@ -325,6 +380,13 @@ function AdminUsers() {
 }
 
 function RoleBadge({ role }: { role: string }) {
+  if (role === "Telegram") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/10 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-sky-600 dark:text-sky-400">
+        Telegram
+      </span>
+    );
+  }
   if (role === "Label / QA") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-violet-500/10 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-violet-600 dark:text-violet-400">
