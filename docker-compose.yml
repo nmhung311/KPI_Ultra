@@ -1,8 +1,11 @@
+# Linux: network_mode: host — container dùng chung mạng với host (VPN/route giống máy thật).
+# Chiếm cổng trực tiếp trên máy: 3000 (frontend), 5000 (backend), 27017 (mongo), 4444 (selenium), 7900 (VNC).
+# Trên Windows/macOS Docker Desktop không hỗ trợ host network đầy đủ; dùng Linux hoặc compose bridge riêng.
+
 services:
   frontend:
     build: ./frontend
-    ports:
-      - "3000:3000"
+    network_mode: host
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -11,13 +14,12 @@ services:
 
   backend:
     build: ./backend
-    ports:
-      - "5000:5000"
+    network_mode: host
     volumes:
       - ./backend:/app
     environment:
-      - MONGO_URI=mongodb://mongodb:27017/kpi_db
-      - SELENIUM_URL=http://selenium:4444/wd/hub
+      - MONGO_URI=mongodb://127.0.0.1:27017/kpi_db
+      - SELENIUM_URL=http://127.0.0.1:4444/wd/hub
     depends_on:
       mongodb:
         condition: service_healthy
@@ -25,11 +27,9 @@ services:
         condition: service_started
 
   mongodb:
-    # Volume đã ở featureCompatibilityVersion 8.2 — cần image >= 8.2 (không dùng 7.x).
     image: mongo:8.2
+    network_mode: host
     restart: unless-stopped
-    ports:
-      - "27017:27017"
     volumes:
       - mongodb_data:/data/db
     command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.5"]
@@ -42,10 +42,8 @@ services:
 
   selenium:
     image: selenium/standalone-chrome:latest
+    network_mode: host
     shm_size: 2gb
-    ports:
-      - "4444:4444"
-      - "7900:7900" # VNC port để xem live (nếu cần)
 
 volumes:
   mongodb_data:

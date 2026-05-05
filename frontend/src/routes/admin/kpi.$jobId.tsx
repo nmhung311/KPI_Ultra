@@ -1341,17 +1341,15 @@ function PackageDetail() {
               <thead className="border-b border-border bg-muted/40 text-[13px] font-medium text-muted-foreground">
                 <tr>
                   <th className="px-5 py-4">{t("qa_username")}</th>
-                  <th className="px-5 py-4 text-center">Records QA1</th>
-                  <th className="px-5 py-4 text-center">KPI QA1</th>
-                  <th className="px-5 py-4 text-center">Records QA2</th>
-                  <th className="px-5 py-4 text-center">KPI QA2</th>
+                  <th className="px-5 py-4 text-center">Records QA</th>
+                  <th className="px-5 py-4 text-center">KPI QA</th>
                   <th className="px-5 py-4 text-right">{t("actions")}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/60">
                 {qaList.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-12 text-center text-muted-foreground">
+                    <td colSpan={4} className="py-12 text-center text-muted-foreground">
                       {t("empty_qa")}
                     </td>
                   </tr>
@@ -1363,13 +1361,11 @@ function PackageDetail() {
                       onClick={() => setSelectedQA(qa)}
                     >
                       <td className="px-5 py-4 font-semibold text-accent">{qa.username}</td>
-                      <td className="px-5 py-4 text-center font-medium text-foreground/80">{qa.recordsCountQA1}</td>
-                      <td className="px-5 py-4 text-center font-semibold tabular-nums text-amber-600 dark:text-amber-400">
-                        {qa.kpiQA1}
+                      <td className="px-5 py-4 text-center font-medium text-foreground/80">
+                        {qa.recordsCountQA1 + qa.recordsCountQA2}
                       </td>
-                      <td className="px-5 py-4 text-center font-medium text-foreground/80">{qa.recordsCountQA2}</td>
                       <td className="px-5 py-4 text-center font-semibold tabular-nums text-amber-600 dark:text-amber-400">
-                        {qa.kpiQA2}
+                        {qa.kpiQA1 + qa.kpiQA2}
                       </td>
                       <td className="px-5 py-4 text-right">
                         <button className="inline-flex h-8 items-center justify-center rounded-full bg-accent/10 px-4 text-xs font-semibold text-accent transition-colors hover:bg-accent hover:text-primary-foreground group-hover:bg-accent group-hover:text-primary-foreground">

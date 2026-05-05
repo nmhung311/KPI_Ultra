@@ -449,6 +449,20 @@ def _completed_at_calendar_day(completed_at):
     return None
 
 
+def _record_matches_completed_date_filter(rec, date_from, date_to):
+    """True nếu không lọc ngày; nếu có from/to thì record phải có Completed At hợp lệ trong khoảng."""
+    if not date_from and not date_to:
+        return True
+    day = _completed_at_calendar_day(rec.get("Completed At", ""))
+    if not day:
+        return False
+    if date_from and day < date_from:
+        return False
+    if date_to and day > date_to:
+        return False
+    return True
+
+
 def _create_job_manual():
     """Tạo một gói hàng từ JSON (không qua CSV). Tháng suy từ receivedAt."""
     data = request.get_json(silent=True) or {}
@@ -1545,9 +1559,12 @@ def kpi_stats():
     """Thống kê KPI toàn bộ nhân sự trong tháng.
     Query params:
         month: Tháng cần lọc, ví dụ "04/2026". Nếu không truyền sẽ lấy tất cả.
+        from, to: YYYY-MM-DD — chỉ tính record có Completed At trong khoảng (tùy chọn).
     """
     try:
         month = request.args.get('month', None)
+        date_from = (request.args.get("from") or "").strip() or None
+        date_to = (request.args.get("to") or "").strip() or None
         
         # Lấy danh sách job theo tháng
         job_filter = {}
@@ -1577,7 +1594,10 @@ def kpi_stats():
         # Lấy tất cả records thuộc các jobs đã lọc
         records = list(db.results.find({"Job ID": {"$in": job_ids}}, {"_id": 0}))
         
-        # Tổng records thực tế từ các gói hàng
+        if date_from or date_to:
+            records = [r for r in records if _record_matches_completed_date_filter(r, date_from, date_to)]
+        
+        # Tổng records thực tế từ các gói hàng (sau lọc ngày nếu có)
         total_records = len(records)
         
         # ── Bước 1 & 2: Tính KPI Label, QA1, QA2 ──

@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import type { ChangeEvent, MouseEvent, ReactNode } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { motion, AnimatePresence } from "framer-motion";
 import { format, subDays } from "date-fns";
@@ -23,7 +24,6 @@ import {
   Search,
   ChevronUp,
   ChevronDown,
-  Layers,
   Package,
   X,
 } from "lucide-react";
@@ -82,6 +82,8 @@ interface DailyStatsData {
   availableMonths: string[];
 }
 
+type ChartRow = DailySeriesRow & { labelShort: string };
+
 interface StatsData {
   month: string;
   users: UserStat[];
@@ -103,27 +105,29 @@ interface StatsData {
   availableMonths: string[];
 }
 
+const emptyStats = (): StatsData => ({
+  month: "all",
+  users: [],
+  totals: {
+    totalKpiLabel: 0,
+    totalKpiQA1: 0,
+    totalKpiQA1Customer: 0,
+    totalKpiQA2: 0,
+    totalKpiQA: 0,
+    totalKpiCustomer: 0,
+    totalRecords: 0,
+    totalRecordsLabel: 0,
+    totalRecordsQA1: 0,
+    totalRecordsQA2: 0,
+    totalRecordsQA: 0,
+    totalUsers: 0,
+    totalJobs: 0,
+  },
+  availableMonths: [],
+});
+
 export const Route = createFileRoute("/admin/kpi/stats")({
   head: () => ({ meta: [{ title: "Thống kê KPI nhân sự" }] }),
-  loader: async () => {
-    try {
-      const API_BASE = apiBase();
-      const res = await fetch(`${API_BASE}/api/kpi/stats`);
-      if (!res.ok) throw new Error("Failed to fetch stats");
-      const stats: StatsData = await res.json();
-      return { stats };
-    } catch (e) {
-      console.error(e);
-      return {
-        stats: {
-          month: "all",
-          users: [],
-          totals: { totalKpiLabel: 0, totalKpiQA1: 0, totalKpiQA1Customer: 0, totalKpiQA2: 0, totalKpiQA: 0, totalKpiCustomer: 0, totalRecords: 0, totalRecordsLabel: 0, totalRecordsQA1: 0, totalRecordsQA2: 0, totalRecordsQA: 0, totalUsers: 0, totalJobs: 0 },
-          availableMonths: [],
-        } as StatsData,
-      };
-    }
-  },
   component: KpiStatsPage,
 });
 
@@ -131,10 +135,9 @@ type SortKey = "username" | "kpiLabel" | "kpiQA" | "recordsLabel" | "recordsQA" 
 type SortDir = "asc" | "desc";
 
 function KpiStatsPage() {
-  const { stats: initialStats } = Route.useLoaderData();
-  const [stats, setStats] = useState<StatsData>(initialStats);
-  const [selectedMonth, setSelectedMonth] = useState<string>(initialStats.month === "all" ? "all" : initialStats.month);
-  const [isLoading, setIsLoading] = useState(false);
+  const [stats, setStats] = useState<StatsData>(emptyStats);
+  const [selectedMonth, setSelectedMonth] = useState<string>("all");
+  const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("total");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
@@ -145,6 +148,34 @@ function KpiStatsPage() {
   const [dateFrom, setDateFrom] = useState(() => format(subDays(new Date(), 45), "yyyy-MM-dd"));
   const [dateTo, setDateTo] = useState(() => format(new Date(), "yyyy-MM-dd"));
   const [dailyLoading, setDailyLoading] = useState(false);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    const run = async () => {
+      setIsLoading(true);
+      try {
+        const API_BASE = apiBase();
+        const params = new URLSearchParams();
+        if (selectedMonth !== "all") params.set("month", selectedMonth);
+        if (dateFrom) params.set("from", dateFrom);
+        if (dateTo) params.set("to", dateTo);
+        const q = params.toString();
+        const url = `${API_BASE}/api/kpi/stats${q ? `?${q}` : ""}`;
+        const res = await fetch(url, { signal: ac.signal });
+        if (!res.ok) throw new Error("stats failed");
+        const data: StatsData = await res.json();
+        if (!ac.signal.aborted) setStats(data);
+      } catch (e) {
+        if ((e as Error).name === "AbortError") return;
+        console.error(e);
+        if (!ac.signal.aborted) setStats(emptyStats());
+      } finally {
+        if (!ac.signal.aborted) setIsLoading(false);
+      }
+    };
+    run();
+    return () => ac.abort();
+  }, [selectedMonth, dateFrom, dateTo]);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -179,9 +210,9 @@ function KpiStatsPage() {
     return [...stats.users].map((u) => u.username).sort((a, b) => a.localeCompare(b, "vi"));
   }, [stats.users]);
 
-  const chartData = useMemo(() => {
+  const chartData = useMemo((): ChartRow[] => {
     if (!dailyStats?.series?.length) return [];
-    return dailyStats.series.map((row) => ({
+    return dailyStats.series.map((row: DailySeriesRow): ChartRow => ({
       ...row,
       labelShort: format(new Date(row.date + "T12:00:00"), "dd/MM"),
     }));
@@ -192,42 +223,24 @@ function KpiStatsPage() {
   // Filter users who have QA records, sorted by kpi descending
   const qaUsers1 = useMemo(() => {
     return stats.users
-      .filter((u) => u.recordsQA1 > 0)
-      .sort((a, b) => b.kpiQA1 - a.kpiQA1);
+      .filter((u: UserStat) => u.recordsQA1 > 0)
+      .sort((a: UserStat, b: UserStat) => b.kpiQA1 - a.kpiQA1);
   }, [stats.users]);
 
   const qaUsers1Customer = useMemo(() => {
     return stats.users
-      .filter((u) => u.recordsQA1 > 0)
-      .sort((a, b) => (b.kpiQA1Customer || 0) - (a.kpiQA1Customer || 0));
+      .filter((u: UserStat) => u.recordsQA1 > 0)
+      .sort((a: UserStat, b: UserStat) => (b.kpiQA1Customer || 0) - (a.kpiQA1Customer || 0));
   }, [stats.users]);
 
   const qaUsers2 = useMemo(() => {
     return stats.users
-      .filter((u) => u.recordsQA2 > 0)
-      .sort((a, b) => b.kpiQA2 - a.kpiQA2);
+      .filter((u: UserStat) => u.recordsQA2 > 0)
+      .sort((a: UserStat, b: UserStat) => b.kpiQA2 - a.kpiQA2);
   }, [stats.users]);
-
-  const fetchStats = async (month: string) => {
-    setIsLoading(true);
-    try {
-      const API_BASE = apiBase();
-      const url = month === "all" ? `${API_BASE}/api/kpi/stats` : `${API_BASE}/api/kpi/stats?month=${encodeURIComponent(month)}`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data: StatsData = await res.json();
-        setStats(data);
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   const handleMonthChange = (month: string) => {
     setSelectedMonth(month);
-    fetchStats(month);
   };
 
   const toggleSort = (key: SortKey) => {
@@ -245,11 +258,11 @@ function KpiStatsPage() {
     // Filter by search
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
-      users = users.filter((u) => u.username.toLowerCase().includes(q));
+      users = users.filter((u: UserStat) => u.username.toLowerCase().includes(q));
     }
 
     // Sort
-    const sorted = [...users].sort((a, b) => {
+    const sorted = [...users].sort((a: UserStat, b: UserStat) => {
       let valA: number | string;
       let valB: number | string;
 
@@ -292,7 +305,7 @@ function KpiStatsPage() {
 
   const handleExportCSV = () => {
     const headers = ["STT", "Username", "Vai trò", "Records Label", "Records QA", "KPI Label", "KPI QA", "Tổng KPI"];
-    const rows = filteredAndSorted.map((u, i) => [
+    const rows = filteredAndSorted.map((u: UserStat, i: number) => [
       i + 1,
       u.username,
       u.role,
@@ -315,12 +328,12 @@ function KpiStatsPage() {
       stats.totals.totalKpiLabel + stats.totals.totalKpiQA,
     ]);
 
-    const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
+    const csv = [headers.join(","), ...rows.map((r: (string | number)[]) => r.join(","))].join("\n");
     const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `kpi_stats_${selectedMonth === "all" ? "all" : selectedMonth.replace("/", "-")}.csv`;
+    a.download = `kpi_stats_${selectedMonth === "all" ? "all" : selectedMonth.replace("/", "-")}_${dateFrom}_${dateTo}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -348,47 +361,73 @@ function KpiStatsPage() {
           Thống kê KPI
         </h1>
         <p className="mt-3 max-w-2xl text-lg text-muted-foreground">
-          Tổng hợp KPI Label và KPI QA theo tháng; biểu đồ theo ngày chỉ dựa trên trường thời gian hoàn thành của từng record (Completed At).
+          Bảng tổng KPI theo nhân sự và biểu đồ theo ngày đều lọc theo trường Completed At trong khoảng ngày Từ / Đến (và tháng gói hàng nếu chọn). Mỗi user chỉ gồm record có ngày hoàn thành nằm trong khoảng đó.
         </p>
       </motion.div>
 
-      {/* Month Selector + Actions */}
+      {/* Month Selector + date range (ảnh hưởng bảng tổng + biểu đồ) */}
       <motion.div
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, delay: 0.1 }}
         className="mt-10 flex flex-col items-start justify-between gap-4 md:flex-row md:items-center"
       >
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-2 rounded-full border border-border bg-card p-1 shadow-sm transition-all hover:shadow-md">
-            <div className="flex items-center gap-1.5 pl-3 pr-2 text-sm text-muted-foreground">
-              <Calendar className="h-4 w-4" />
-              <select
-                value={selectedMonth}
-                onChange={(e) => handleMonthChange(e.target.value)}
-                className="bg-transparent py-1.5 pr-2 text-sm font-medium text-foreground outline-none cursor-pointer"
-              >
-                <option value="all">Tất cả tháng</option>
-                {(stats.availableMonths || initialStats.availableMonths).map((m) => (
-                  <option key={m} value={m}>
-                    Tháng {m}
-                  </option>
-                ))}
-              </select>
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2 rounded-full border border-border bg-card p-1 shadow-sm transition-all hover:shadow-md">
+              <div className="flex items-center gap-1.5 pl-3 pr-2 text-sm text-muted-foreground">
+                <Calendar className="h-4 w-4" />
+                <select
+                  value={selectedMonth}
+                  onChange={(e: ChangeEvent<HTMLSelectElement>) => handleMonthChange(e.target.value)}
+                  className="bg-transparent py-1.5 pr-2 text-sm font-medium text-foreground outline-none cursor-pointer"
+                >
+                  <option value="all">Tất cả tháng</option>
+                  {stats.availableMonths.map((m: string) => (
+                    <option key={m} value={m}>
+                      Tháng {m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm">
+                <span className="text-muted-foreground">Từ</span>
+                <input
+                  type="date"
+                  value={dateFrom}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setDateFrom(e.target.value)}
+                  className="bg-transparent font-medium text-foreground outline-none"
+                />
+              </label>
+              <label className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm">
+                <span className="text-muted-foreground">Đến</span>
+                <input
+                  type="date"
+                  value={dateTo}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setDateTo(e.target.value)}
+                  className="bg-transparent font-medium text-foreground outline-none"
+                />
+              </label>
+            </div>
+
+            {/* Search */}
+            <div className="flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 shadow-sm transition-all hover:shadow-md">
+              <Search className="h-4 w-4 text-muted-foreground" />
+              <input
+                type="text"
+                placeholder="Tìm username..."
+                value={searchQuery}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setSearchQuery(e.target.value)}
+                className="bg-transparent py-0.5 text-sm font-medium text-foreground outline-none placeholder:text-muted-foreground/60 w-36"
+              />
             </div>
           </div>
-
-          {/* Search */}
-          <div className="flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 shadow-sm transition-all hover:shadow-md">
-            <Search className="h-4 w-4 text-muted-foreground" />
-            <input
-              type="text"
-              placeholder="Tìm username..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="bg-transparent py-0.5 text-sm font-medium text-foreground outline-none placeholder:text-muted-foreground/60 w-36"
-            />
-          </div>
+          <p className="text-xs text-muted-foreground">
+            KPI tổng theo user (bảng dưới) và biểu đồ đều chỉ tính record có Completed At từ ngày đã chọn.
+          </p>
         </div>
 
         <button
@@ -417,40 +456,23 @@ function KpiStatsPage() {
 
         <div className="mt-5 flex flex-col flex-wrap gap-3 md:flex-row md:items-center">
           <div className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm">
-            <span className="text-muted-foreground">User</span>
+            <span className="text-muted-foreground">Lọc biểu đồ theo user</span>
             <select
               value={dailyUser}
-              onChange={(e) => setDailyUser(e.target.value)}
+              onChange={(e: ChangeEvent<HTMLSelectElement>) => setDailyUser(e.target.value)}
               className="max-w-[220px] cursor-pointer bg-transparent font-medium text-foreground outline-none md:max-w-xs"
             >
               <option value="">Tất cả (hệ thống)</option>
-              {sortedUsernames.map((name) => (
+              {sortedUsernames.map((name: string) => (
                 <option key={name} value={name}>
                   {name}
                 </option>
               ))}
             </select>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm">
-              <span className="text-muted-foreground">Từ</span>
-              <input
-                type="date"
-                value={dateFrom}
-                onChange={(e) => setDateFrom(e.target.value)}
-                className="bg-transparent font-medium text-foreground outline-none"
-              />
-            </label>
-            <label className="flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-sm">
-              <span className="text-muted-foreground">Đến</span>
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(e) => setDateTo(e.target.value)}
-                className="bg-transparent font-medium text-foreground outline-none"
-              />
-            </label>
-          </div>
+          <p className="text-xs text-muted-foreground md:max-w-md">
+            Ngày Từ/Đến đặt ở trên — áp dụng cho bảng KPI tổng và biểu đồ. Chọn một user để chỉ xem cột stacked của người đó.
+          </p>
         </div>
 
         {dailyStats && dailyStats.unknownRecords > 0 && (
@@ -481,8 +503,8 @@ function KpiStatsPage() {
                 <YAxis tick={{ fontSize: 11 }} className="text-muted-foreground" />
                 <Tooltip
                   contentStyle={{ borderRadius: 12, border: "1px solid hsl(var(--border))" }}
-                  labelFormatter={(label) => {
-                    const entry = chartData.find((d) => d.labelShort === label);
+                  labelFormatter={(label: string | number) => {
+                    const entry = chartData.find((d: ChartRow) => d.labelShort === label);
                     return entry?.date ?? String(label);
                   }}
                 />
@@ -509,8 +531,8 @@ function KpiStatsPage() {
               </thead>
               <tbody className="divide-y divide-border/60">
                 {[...chartData]
-                  .sort((a, b) => b.date.localeCompare(a.date))
-                  .map((row) => (
+                  .sort((a: ChartRow, b: ChartRow) => b.date.localeCompare(a.date))
+                  .map((row: ChartRow) => (
                     <tr key={row.date} className="hover:bg-muted/25">
                       <td className="px-4 py-2.5 font-mono text-xs text-foreground">{row.date}</td>
                       <td className="px-4 py-2.5 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
@@ -536,18 +558,13 @@ function KpiStatsPage() {
             <h3 className="text-sm font-semibold tracking-tight text-foreground">
               Chi tiết KPI theo ngày — từng nhân sự
             </h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Mỗi dòng là tổng KPI trong ngày của một user theo vai trò Current Worker (Label), QA1, QA2; cùng logic lọc gói và ẩn user như biểu đồ phía trên.
-            </p>
             <div className="mt-3 max-h-[min(480px,55vh)] overflow-auto rounded-xl border border-border/60">
-              <table className="w-full min-w-[880px] text-left text-sm">
+              <table className="w-full min-w-[640px] text-left text-sm">
                 <thead className="sticky top-0 z-[1] border-b border-border bg-muted/90 text-[12px] font-medium text-muted-foreground backdrop-blur-sm">
                   <tr>
                     <th className="px-4 py-3">Ngày</th>
                     <th className="px-4 py-3">Username</th>
                     <th className="px-4 py-3 text-right">KPI Label</th>
-                    <th className="px-4 py-3 text-right">KPI QA1</th>
-                    <th className="px-4 py-3 text-right">KPI QA2</th>
                     <th className="px-4 py-3 text-right">KPI QA</th>
                     <th className="px-4 py-3 text-right">Tổng KPI</th>
                     <th className="px-4 py-3 text-right">Rec. L</th>
@@ -555,18 +572,12 @@ function KpiStatsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/60">
-                  {userBreakdownRows.map((row) => (
+                  {userBreakdownRows.map((row: UserDailyBreakdownRow) => (
                     <tr key={`${row.date}-${row.username}`} className="hover:bg-muted/25">
                       <td className="px-4 py-2.5 font-mono text-xs text-foreground">{row.date}</td>
                       <td className="px-4 py-2.5 font-medium text-foreground">{row.username}</td>
                       <td className="px-4 py-2.5 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
                         {row.kpiLabel.toLocaleString()}
-                      </td>
-                      <td className="px-4 py-2.5 text-right tabular-nums text-amber-600/90 dark:text-amber-400/90">
-                        {row.kpiQA1.toLocaleString()}
-                      </td>
-                      <td className="px-4 py-2.5 text-right tabular-nums text-amber-700 dark:text-amber-500">
-                        {row.kpiQA2.toLocaleString()}
                       </td>
                       <td className="px-4 py-2.5 text-right tabular-nums text-amber-600 dark:text-amber-400">
                         {row.kpiQA.toLocaleString()}
@@ -696,7 +707,7 @@ function KpiStatsPage() {
                 </tr>
               ) : (
                 <>
-                  {filteredAndSorted.map((u, idx) => (
+                  {filteredAndSorted.map((u: UserStat, idx: number) => (
                     <motion.tr
                       key={u.username}
                       initial={{ opacity: 0, x: -10 }}
@@ -820,7 +831,7 @@ function SummaryCard({
   onClick,
   clickable,
 }: {
-  icon: React.ReactNode;
+  icon: ReactNode;
   label: string;
   value: number;
   color: string;
@@ -925,11 +936,11 @@ function QADetailModal({
         exit={{ opacity: 0, scale: 0.95, y: 20 }}
         transition={{ duration: 0.3, type: "spring", damping: 25, stiffness: 300 }}
         className="fixed inset-0 z-50 flex items-center justify-center p-4"
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e: MouseEvent<HTMLDivElement>) => e.stopPropagation()}
       >
         <div
           className="relative w-full max-w-2xl max-h-[80vh] overflow-hidden rounded-3xl border border-border/60 bg-card shadow-2xl flex flex-col"
-          onClick={(e) => e.stopPropagation()}
+          onClick={(e: MouseEvent<HTMLDivElement>) => e.stopPropagation()}
         >
           {/* Header */}
           <div className="flex items-center justify-between border-b border-border/40 px-6 py-5">
@@ -965,7 +976,7 @@ function QADetailModal({
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/60">
-                {users.map((u, idx) => {
+                {users.map((u: UserStat, idx: number) => {
                   const jobCount = type.includes("QA1") ? u.jobCountQA1 : u.jobCountQA2;
                   const records = type.includes("QA1") ? u.recordsQA1 : u.recordsQA2;
                   const kpi = type === "QA1 Khách hàng" ? u.kpiQA1Customer : (type === "QA1" ? u.kpiQA1 : u.kpiQA2);
